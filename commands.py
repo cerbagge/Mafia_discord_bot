@@ -399,11 +399,14 @@ class SlashCommands(commands.Cog):
         )
         
         if queue_size > 0:
-            estimated_time = queue_size * 57  # 대략 배치당 57초 추정
+            estimated_time = queue_size * 36  # 대략 배치당 36초 추정
             minutes = estimated_time // 60
             seconds = estimated_time % 60
+            ours = minutes // 60
 
-        if minutes > 0:
+        if ours > 0:
+            time_str = f"약 {ours}시간 {minutes}분 {seconds}초"
+        elif minutes > 0:
             time_str = f"약 {minutes}분 {seconds}초"
         else:
             time_str = f"약 {seconds}초"
