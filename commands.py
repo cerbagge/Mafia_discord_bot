@@ -23,15 +23,6 @@ class SlashCommands(commands.Cog):
     def is_admin_ctx(self, ctx):
         """접두사 커맨드용 관리자 권한 확인"""
         return ctx.author.guild_permissions.administrator
-
-    # 접두사 커맨드 pe 추가
-    @commands.command(name="pe")
-    async def pe_prefix(self, ctx, user_id: str):
-        """접두사 버전: $pe <user_id>"""
-        # 관리자 권한 확인
-        if not self.is_admin_ctx(ctx):
-            await ctx.send("🚫 이 명령어는 관리자만 사용할 수 있습니다.", delete_after=5)
-            return
         
         try:
             queue_manager.add_user(int(user_id))
@@ -76,21 +67,6 @@ class SlashCommands(commands.Cog):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="pe", description="유저를 인증 대기열에 추가")
-    @app_commands.describe(user_id="디스코드 유저 ID")
-    @app_commands.check(is_admin)
-    async def pe(self, interaction: discord.Interaction, user_id: str):
-        try:
-            queue_manager.add_user(int(user_id))
-            await interaction.response.send_message(f"✅ <@{user_id}> 대기열에 추가됨", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"🚫 오류 발생: `{str(e)}`", ephemeral=True)
-
-    @app_commands.command(name="국민확인", description="디스코드 아이디를 이용해서 국민이 어떤 나라에 속해있는지 알려줍니다")
-    @app_commands.describe(
-        대상="확인할 대상 유형을 선택하세요",
-        멘션or아이디="유저: @유저 또는 유저ID / 역할: @역할 또는 역할ID"
-    )
     @app_commands.check(is_admin)
     async def 국민확인(
         self,
