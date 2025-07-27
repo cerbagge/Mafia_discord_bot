@@ -2,10 +2,14 @@ import os
 import asyncio
 import discord
 import aiohttp
+import json
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from queue_manager import queue_manager
 from role_manager import assign_role_and_nick
 import time
+
+# 예외 사용자 파일 경로
+EXCEPTION_USERS_FILE = "exception_users.json"
 
 def get_env_int(key, default=None):
     value = os.getenv(key)
@@ -37,6 +41,121 @@ class RateLimiter:
             return 0
         oldest_request = min(self.requests)
         return max(0, self.time_window - (time.time() - oldest_request))
+
+# 예외 사용자 관리 함수들 - 디버깅 로그 추가
+def load_exception_users():
+    """예외 사용자 목록을 JSON 파일에서 로드"""
+    try:
+        if os.path.exists(EXCEPTION_USERS_FILE):
+            print(f"🔍 예외 사용자 파일 로드 시도: {EXCEPTION_USERS_FILE}")
+            with open(EXCEPTION_USERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                exception_users = set(data.get("exception_users", []))
+                print(f"📋 예외 사용자 로드 완료: {len(exception_users)}명 - {list(exception_users)}")
+                return exception_users
+        else:
+            print(f"⚠️ 예외 사용자 파일이 존재하지 않음: {EXCEPTION_USERS_FILE}")
+            return set()
+    except Exception as e:
+        print(f"❌ 예외 사용자 파일 로드 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return set()
+
+def save_exception_users(exception_users):
+    """예외 사용자 목록을 JSON 파일에 저장"""
+    try:
+        print(f"💾 예외 사용자 파일 저장 시도: {len(exception_users)}명 - {list(exception_users)}")
+        
+        # 디렉토리 생성 (필요한 경우)
+        os.makedirs(os.path.dirname(EXCEPTION_USERS_FILE) if os.path.dirname(EXCEPTION_USERS_FILE) else '.', exist_ok=True)
+        
+        data = {"exception_users": list(exception_users)}
+        with open(EXCEPTION_USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        print(f"✅ 예외 사용자 파일 저장 완료: {EXCEPTION_USERS_FILE}")
+        return True
+    except Exception as e:
+        print(f"❌ 예외 사용자 파일 저장 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def add_exception_user(user_id):
+    """예외 사용자 추가"""
+    try:
+        print(f"➕ 예외 사용자 추가 시도: {user_id}")
+        exception_users = load_exception_users()
+        user_id_str = str(user_id)
+        
+        if user_id_str in exception_users:
+            print(f"⚠️ 이미 예외 목록에 있는 사용자: {user_id}")
+            return True  # 이미 있어도 성공으로 처리
+            
+        exception_users.add(user_id_str)
+        result = save_exception_users(exception_users)
+        
+        if result:
+            print(f"✅ 예외 사용자 추가 완료: {user_id}")
+        else:
+            print(f"❌ 예외 사용자 추가 실패: {user_id}")
+            
+        return result
+    except Exception as e:
+        print(f"❌ 예외 사용자 추가 중 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def remove_exception_user(user_id):
+    """예외 사용자 제거"""
+    try:
+        print(f"➖ 예외 사용자 제거 시도: {user_id}")
+        exception_users = load_exception_users()
+        user_id_str = str(user_id)
+        
+        if user_id_str not in exception_users:
+            print(f"⚠️ 예외 목록에 없는 사용자: {user_id}")
+            return True  # 없어도 성공으로 처리
+            
+        exception_users.discard(user_id_str)
+        result = save_exception_users(exception_users)
+        
+        if result:
+            print(f"✅ 예외 사용자 제거 완료: {user_id}")
+        else:
+            print(f"❌ 예외 사용자 제거 실패: {user_id}")
+            
+        return result
+    except Exception as e:
+        print(f"❌ 예외 사용자 제거 중 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def is_exception_user(user_id):
+    """사용자가 예외 목록에 있는지 확인"""
+    try:
+        exception_users = load_exception_users()
+        user_id_str = str(user_id)
+        is_exception = user_id_str in exception_users
+        print(f"🔍 예외 사용자 확인: {user_id} -> {is_exception}")
+        return is_exception
+    except Exception as e:
+        print(f"❌ 예외 사용자 확인 중 오류: {e}")
+        return False
+
+def get_exception_users_list():
+    """예외 사용자 목록 반환"""
+    try:
+        exception_users = load_exception_users()
+        users_list = list(exception_users)
+        print(f"📋 예외 사용자 목록 반환: {len(users_list)}명 - {users_list}")
+        return users_list
+    except Exception as e:
+        print(f"❌ 예외 사용자 목록 반환 중 오류: {e}")
+        return []
 
 async def remove_roles_and_reset_nick(member):
     try:
@@ -276,6 +395,59 @@ async def get_user_info_by_name(session, discord_id, rate_limiter):
         print(f"💥 예외 발생 (Discord ID: {discord_id}): {str(e)}")
         return {"success": False, "error": f"API 호출 중 오류: {str(e)}"}
 
+# /국민확인 명령어를 위한 단일 사용자 처리 함수 (콘솔 로그 포함)
+async def process_single_user_with_logs(member, session, rate_limiter):
+    """단일 사용자 처리 (콘솔 로그 포함)"""
+    try:
+        print(f"🔍 /국민확인 명령어 실행: {member.display_name} ({member.id})")
+        
+        BASE_NATION = os.getenv("BASE_NATION", "Red_Mafia")
+        
+        # 3단계 API 호출로 사용자 정보 조회
+        user_info = await get_user_info_by_name(session, member.id, rate_limiter)
+        
+        if not user_info["success"]:
+            error_msg = user_info["error"]
+            mc_id = user_info.get("mc_id", "알 수 없음")
+            town = user_info.get("town", "")
+            
+            print(f"❌ /국민확인 API 조회 실패: {member.display_name} - {error_msg}")
+            
+            # 에러 메시지 구성
+            if mc_id != "알 수 없음":
+                if town:
+                    error_detail = f"IGN: `{mc_id}`, 마을: `{town}` - {error_msg}"
+                else:
+                    error_detail = f"IGN: `{mc_id}` - {error_msg}"
+            else:
+                error_detail = error_msg
+            
+            return {"success": False, "message": f"⚠️ {member.mention} 인증 실패 - {error_detail}"}
+
+        mc_id = user_info["mc_id"]
+        town = user_info["town"]
+        nation = user_info["nation"]
+        
+        print(f"📋 /국민확인 결과: {member.display_name} -> IGN: {mc_id}, 마을: {town}, 국가: {nation}")
+
+        # 국가 검증 및 닉네임 처리
+        if nation != BASE_NATION:
+            # 다른 국가인 경우에도 닉네임은 업데이트
+            await update_nickname_with_nation(member, mc_id, nation)
+            print(f"⚠️ /국민확인: {member.display_name}는 다른 국가 ({nation}) 국민입니다.")
+            
+            return {"success": False, "message": f"⚠️ {member.mention} 인증 실패 - 국가 불일치 (IGN: `{mc_id}`, 마을: `{town}`, 국가: `{nation}`)"}
+
+        # Red_Mafia 국민인 경우 기존 로직으로 역할 할당 및 닉네임 설정
+        await update_nickname_with_nation(member, mc_id, nation)
+        print(f"✅ /국민확인 성공: {member.display_name} -> {mc_id} ({town}, {nation})")
+        
+        return {"success": True, "message": f"✅ {member.mention} 인증 성공! IGN: `{mc_id}`, 마을: `{town}`, 국가: `{nation}`"}
+
+    except Exception as e:
+        print(f"❌ /국민확인 처리 중 오류 ({member.display_name}): {e}")
+        return {"success": False, "message": f"❌ 처리 중 오류가 발생했습니다: {str(e)}"}
+
 def setup_scheduler(bot):
     try:
         GUILD_ID = get_env_int("GUILD_ID")
@@ -297,6 +469,11 @@ def setup_scheduler(bot):
     async def process_single_user(member, guild, success_channel, failure_channel, session):
         try:
             print(f"🔄 처리 중: {member.display_name} ({member.id})")
+
+            # 예외 사용자 확인 - 중요한 부분!
+            if is_exception_user(member.id):
+                print(f"🚫 예외 사용자로 설정됨 - 처리 건너뜀: {member.display_name} ({member.id})")
+                return True  # 예외 사용자는 성공으로 처리하여 더 이상 처리하지 않음
 
             BASE_NATION = os.getenv("BASE_NATION", "Red_Mafia")
             remove_role_on_fail = os.getenv("REMOVE_ROLE_IF_WRONG_NATION", "true").lower() == "true"
@@ -369,6 +546,7 @@ def setup_scheduler(bot):
         failed_users = []
         processed_count = 0
         success_count = 0
+        exception_count = 0  # 예외 사용자 카운트 추가
         batch_size = 3  # API 대기시간 때문에 배치 크기 줄임
         current_batch = 0
 
@@ -382,6 +560,12 @@ def setup_scheduler(bot):
                 if not member:
                     print(f"⚠️ 멤버를 찾을 수 없습니다 (ID: {user_id})")
                     failed_users.append(f"<@{user_id}>")
+                    continue
+
+                # 예외 사용자 체크를 여기서도 한 번 더 확인
+                if is_exception_user(member.id):
+                    exception_count += 1
+                    print(f"🚫 예외 사용자 건너뜀: {member.display_name} ({member.id})")
                     continue
 
                 success = await process_single_user(member, guild, success_channel, failure_channel, session)
@@ -405,7 +589,7 @@ def setup_scheduler(bot):
                 await failure_channel.send(f"❌ 인증 실패 유저 ({i+1}-{min(i+chunk_size, len(failed_users))}/{len(failed_users)}): {', '.join(chunk)}")
 
         if processed_count > 0:
-            print(f"📊 대기열 처리 완료: 총 {processed_count}명 (성공: {success_count}, 실패: {len(failed_users)})")
+            print(f"📊 대기열 처리 완료: 총 {processed_count}명 (성공: {success_count}, 실패: {len(failed_users)}, 예외제외: {exception_count})")
 
     # 1분마다 대기열 처리 (API 대기시간 고려해서 간격 늘릴 수 있음)
     scheduler.add_job(process_queue, "interval", seconds=60)
@@ -450,7 +634,6 @@ def setup_scheduler(bot):
 
         print(f"🕒 자동 실행 스케줄: 매주 {day_str}요일 {auto_hour}:{auto_minute:02d}")
 
-
     except ValueError as e:
         print(f"⚠️ 자동 실행 스케줄 설정 실패: {e}")
 
@@ -473,6 +656,11 @@ async def add_auto_roles(bot):
 
         added_count = 0
         processed_roles = 0
+        exception_count = 0
+
+        # 예외 사용자 목록 미리 로드
+        exception_users_set = load_exception_users()
+        print(f"🚫 예외 사용자 목록 로드: {len(exception_users_set)}명")
 
         with open(auto_roles_file, "r", encoding="utf-8") as f:
             for line_num, line in enumerate(f.readlines(), 1):
@@ -483,18 +671,42 @@ async def add_auto_roles(bot):
                 try:
                     role = guild.get_role(int(role_id))
                     if role:
+                        role_added_count = 0
+                        role_exception_count = 0
+                        
                         for member in role.members:
+                            # 예외 사용자인지 확인 (문자열로 비교)
+                            if str(member.id) in exception_users_set:
+                                role_exception_count += 1
+                                exception_count += 1
+                                print(f"🚫 예외 사용자 제외: {member.display_name} ({member.id})")
+                                continue
+                                
                             if not queue_manager.is_user_in_queue(member.id):
                                 queue_manager.add_user(member.id)
+                                role_added_count += 1
                                 added_count += 1
+                        
                         processed_roles += 1
-                        print(f"🔄 자동 역할 처리: {role.name} - {len(role.members)}명 추가")
+                        print(f"🔄 자동 역할 처리: {role.name} - 총 {len(role.members)}명 중 {role_added_count}명 추가, {role_exception_count}명 예외 제외")
                     else:
                         print(f"⚠️ 역할 없음 (ID: {role_id}, 라인: {line_num})")
                 except Exception as e:
                     print(f"❌ 역할 처리 오류 (ID: {role_id}, 라인: {line_num}): {e}")
 
-        print(f"📋 자동 역할 처리 완료: {processed_roles}개 역할, 총 {added_count}명 추가")
+        # 예외 대상 목록 출력
+        if exception_users_set:
+            exception_mentions = []
+            for user_id in exception_users_set:
+                member = guild.get_member(int(user_id))
+                if member:
+                    exception_mentions.append(member.display_name)
+                else:
+                    exception_mentions.append(f"<@{user_id}>")
+            
+            print(f"🚫 예외대상: {', '.join(exception_mentions)} (총 {len(exception_users_set)}명)")
+        
+        print(f"📋 자동 역할 처리 완료: {processed_roles}개 역할, 총 {added_count}명 추가, {exception_count}명 예외 제외")
 
     except Exception as e:
         print(f"❌ 자동 역할 처리 중 오류: {e}")
@@ -509,3 +721,171 @@ async def clear_queue():
     cleared_count = queue_manager.clear_queue()
     print(f"🧹 대기열 초기화 완료: {cleared_count}명 제거됨")
     return cleared_count
+
+# 새로운 함수들 추가
+
+async def handle_exception_command(interaction, action, target_user=None):
+    """예외설정 명령어 처리"""
+    try:
+        print(f"🔧 예외설정 명령어 처리: {action}, 대상: {target_user.display_name if target_user else '없음'}")
+        
+        if action == "목록":
+            exception_users = get_exception_users_list()
+            if not exception_users:
+                await interaction.response.send_message("📋 예외 설정된 사용자가 없습니다.", ephemeral=True)
+                return
+            
+            guild = interaction.guild
+            user_mentions = []
+            for user_id in exception_users:
+                member = guild.get_member(int(user_id))
+                if member:
+                    user_mentions.append(f"{member.display_name} ({member.mention})")
+                else:
+                    user_mentions.append(f"<@{user_id}> (서버에 없음)")
+            
+            embed = discord.Embed(
+                title="🚫 예외 설정 사용자 목록",
+                description="\n".join(user_mentions),
+                color=0xff6b6b
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+        elif action == "추가":
+            if not target_user:
+                await interaction.response.send_message("❌ 추가할 사용자를 지정해주세요.", ephemeral=True)
+                return
+            
+            print(f"➕ 예외 사용자 추가 시도: {target_user.display_name} ({target_user.id})")
+            
+            if add_exception_user(target_user.id):
+                await interaction.response.send_message(
+                    f"✅ {target_user.mention}을(를) 예외 목록에 추가했습니다.\n"
+                    f"이제 이 사용자는 자동 역할 부여 및 대기열 처리에서 제외됩니다.", 
+                    ephemeral=True
+                )
+                print(f"🚫 예외 사용자 추가 완료: {target_user.display_name} ({target_user.id})")
+            else:
+                await interaction.response.send_message("❌ 예외 목록 저장에 실패했습니다.", ephemeral=True)
+                
+        elif action == "제거":
+            if not target_user:
+                await interaction.response.send_message("❌ 제거할 사용자를 지정해주세요.", ephemeral=True)
+                return
+            
+            print(f"➖ 예외 사용자 제거 시도: {target_user.display_name} ({target_user.id})")
+            
+            if remove_exception_user(target_user.id):
+                await interaction.response.send_message(
+                    f"✅ {target_user.mention}을(를) 예외 목록에서 제거했습니다.\n"
+                    f"이제 이 사용자는 자동 역할 부여 및 대기열 처리에 포함됩니다.", 
+                    ephemeral=True
+                )
+                print(f"✅ 예외 사용자 제거 완료: {target_user.display_name} ({target_user.id})")
+            else:
+                await interaction.response.send_message("❌ 예외 목록 저장에 실패했습니다.", ephemeral=True)
+        
+    except Exception as e:
+        print(f"❌ 예외설정 명령어 처리 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        try:
+            await interaction.response.send_message("❌ 명령어 처리 중 오류가 발생했습니다.", ephemeral=True)
+        except:
+            # 이미 응답했을 수도 있으니 followup 시도
+            try:
+                await interaction.followup.send("❌ 명령어 처리 중 오류가 발생했습니다.", ephemeral=True)
+            except:
+                pass
+
+async def handle_citizen_check_command(interaction, target_user):
+    """국민확인 명령어 처리"""
+    try:
+        print(f"🔍 국민확인 명령어 처리: {target_user.display_name} ({target_user.id})")
+        
+        await interaction.response.defer()
+        
+        rate_limiter = RateLimiter()
+        
+        async with aiohttp.ClientSession() as session:
+            result = await process_single_user_with_logs(target_user, session, rate_limiter)
+            
+            if result["success"]:
+                embed = discord.Embed(
+                    title="✅ 국민확인 성공",
+                    description=result["message"],
+                    color=0x00ff00
+                )
+            else:
+                embed = discord.Embed(
+                    title="❌ 국민확인 실패",
+                    description=result["message"],
+                    color=0xff0000
+                )
+            
+            await interaction.followup.send(embed=embed)
+            
+    except Exception as e:
+        print(f"❌ 국민확인 명령어 처리 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        try:
+            await interaction.followup.send("❌ 명령어 처리 중 오류가 발생했습니다.")
+        except:
+            pass
+
+# 대기열에 사용자 추가할 때 예외 사용자 체크하는 헬퍼 함수
+def add_users_to_queue_with_exception_check(user_ids, guild=None):
+    """예외 사용자를 제외하고 대기열에 사용자들을 추가"""
+    try:
+        exception_users_set = load_exception_users()
+        added_count = 0
+        exception_count = 0
+        
+        for user_id in user_ids:
+            if str(user_id) in exception_users_set:
+                exception_count += 1
+                if guild:
+                    member = guild.get_member(user_id)
+                    member_name = member.display_name if member else f"ID:{user_id}"
+                    print(f"🚫 예외 사용자 제외: {member_name} ({user_id})")
+                continue
+                
+            if not queue_manager.is_user_in_queue(user_id):
+                queue_manager.add_user(user_id)
+                added_count += 1
+        
+        print(f"📋 대기열 추가 완료: {added_count}명 추가, {exception_count}명 예외 제외")
+        return {"added": added_count, "excluded": exception_count}
+        
+    except Exception as e:
+        print(f"❌ 대기열 추가 중 오류: {e}")
+        return {"added": 0, "excluded": 0}
+
+# 역할 기반 대기열 추가 함수 (예외 사용자 체크 포함)
+async def add_role_members_to_queue(guild, role_id):
+    """특정 역할의 멤버들을 예외 사용자를 제외하고 대기열에 추가"""
+    try:
+        role = guild.get_role(role_id)
+        if not role:
+            print(f"❌ 역할을 찾을 수 없습니다 (ID: {role_id})")
+            return {"added": 0, "excluded": 0, "error": "역할을 찾을 수 없음"}
+        
+        user_ids = [member.id for member in role.members]
+        result = add_users_to_queue_with_exception_check(user_ids, guild)
+        
+        print(f"🔄 역할 '{role.name}' 처리: 총 {len(user_ids)}명 중 {result['added']}명 추가, {result['excluded']}명 예외 제외")
+        return result
+        
+    except Exception as e:
+        print(f"❌ 역할 멤버 대기열 추가 중 오류: {e}")
+        return {"added": 0, "excluded": 0, "error": str(e)}
+
+# 기존 export 함수들은 그대로 유지
+async def get_user_info_by_name_export(session, discord_id, rate_limiter):
+    return await get_user_info_by_name(session, discord_id, rate_limiter)
+
+async def process_single_user_with_logs_export(member, session, rate_limiter):
+    return await process_single_user_with_logs(member, session, rate_limiter)
