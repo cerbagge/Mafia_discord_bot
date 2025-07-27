@@ -10,6 +10,14 @@ except ImportError:
     print("❌ config.py 파일을 찾을 수 없습니다. config.py 파일을 생성해주세요.")
     sys.exit(1)
 
+# 예외 관리자 로드
+try:
+    from exception_manager import exception_manager
+    print("✅ exception_manager 모듈 로드됨")
+except ImportError:
+    print("⚠️ exception_manager.py 파일을 찾을 수 없습니다. 예외 관리 기능이 비활성화됩니다.")
+    exception_manager = None
+
 # Intents 설정
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="/", intents=intents)
@@ -21,6 +29,14 @@ async def on_ready():
     print(f"✅ 길드 ID: {config.GUILD_ID}")
     print(f"✅ Success Channel: {config.SUCCESS_CHANNEL_ID}")
     print(f"✅ Failure Channel: {config.FAILURE_CHANNEL_ID}")
+    
+    # 예외 관리자 초기화
+    if exception_manager:
+        try:
+            exception_count = len(exception_manager.get_exception_users_list())
+            print(f"✅ 예외 관리자 초기화 완료 (예외 사용자: {exception_count}명)")
+        except Exception as e:
+            print(f"⚠️ 예외 관리자 초기화 오류: {e}")
     
     # 확장 로드
     print("📦 확장 로드 중...")
@@ -71,6 +87,23 @@ async def on_member_join(member):
     
     print(f"👋 새 멤버 입장: {member.display_name} ({member.id})")
     
+    # 예외 사용자인지 확인
+    if exception_manager and exception_manager.is_exception_user(member.id):
+        print(f"🚫 예외 사용자이므로 대기열 추가 제외: {member.display_name} ({member.id})")
+        
+        # 예외 사용자용 환영 메시지 (선택사항)
+        try:
+            if config.WELCOME_CHANNEL_ID:
+                welcome_channel = bot.get_channel(config.WELCOME_CHANNEL_ID)
+                if welcome_channel:
+                    await welcome_channel.send(
+                        f"🎉 {member.mention}님 환영합니다! "
+                        f"예외 설정으로 인해 자동 인증 대상에서 제외됩니다."
+                    )
+        except Exception as e:
+            print(f"⚠️ 예외 사용자 환영 메시지 전송 실패: {e}")
+        return
+    
     # 대기열에 추가
     queue_manager.add_user(member.id)
     print(f"📝 대기열에 자동 추가됨: {member.display_name}")
@@ -116,7 +149,59 @@ async def test_command(interaction: discord.Interaction):
     embed.add_field(name="지연시간", value=f"{round(bot.latency * 1000)}ms", inline=True)
     embed.add_field(name="서버", value=interaction.guild.name, inline=True)
     embed.add_field(name="채널", value=interaction.channel.name, inline=True)
+    
+    # 예외 관리자 상태 추가
+    if exception_manager:
+        exception_count = len(exception_manager.get_exception_users_list())
+        embed.add_field(name="예외 사용자", value=f"{exception_count}명", inline=True)
+    
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# 예외 관리 명령어 추가 (관리자용)
+@bot.tree.command(name="예외상태", description="예외 사용자 현황을 확인합니다")
+async def exception_status_command(interaction: discord.Interaction):
+    """예외 사용자 현황 확인 명령어"""
+    # 관리자 권한 확인
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
+        return
+    
+    if not exception_manager:
+        await interaction.response.send_message("❌ 예외 관리자가 로드되지 않았습니다.", ephemeral=True)
+        return
+    
+    try:
+        exception_users = exception_manager.get_exception_users_list()
+        
+        if not exception_users:
+            embed = discord.Embed(
+                title="🚫 예외 사용자 현황",
+                description="현재 예외 설정된 사용자가 없습니다.",
+                color=0x95a5a6
+            )
+        else:
+            guild = interaction.guild
+            user_info_list = []
+            
+            for user_id in exception_users:
+                member = guild.get_member(int(user_id))
+                if member:
+                    user_info_list.append(f"• {member.display_name} ({member.mention})")
+                else:
+                    user_info_list.append(f"• <@{user_id}> (서버에 없음)")
+            
+            embed = discord.Embed(
+                title="🚫 예외 사용자 현황",
+                description=f"총 **{len(exception_users)}명**의 사용자가 예외 설정되어 있습니다.\n\n" + 
+                           "\n".join(user_info_list),
+                color=0xff6b6b
+            )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        print(f"❌ 예외상태 명령어 처리 오류: {e}")
+        await interaction.response.send_message("❌ 명령어 처리 중 오류가 발생했습니다.", ephemeral=True)
 
 async def main():
     """메인 실행 함수"""
