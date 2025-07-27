@@ -7,11 +7,12 @@ import os
 import time
 
 from queue_manager import queue_manager
+from exception_manager import exception_manager
 
 MC_API_BASE = os.getenv("MC_API_BASE")  # 예: https://api.planetearth.kr
-BASE_NATION = os.getenv("BASE_NATION", "Red_Magfia")  # .env에서 국가 설정
-
-
+BASE_NATION = os.getenv("BASE_NATION", "Red_Mafia")  # .env에서 국가 설정
+SUCCESS_ROLE_ID = int(os.getenv("SUCCESS_ROLE_ID", "0"))  # 국민 역할 ID
+SUCCESS_ROLE_ID_OUT = int(os.getenv("SUCCESS_ROLE_ID_OUT", "0"))  # 비국민 역할 ID
 
 class SlashCommands(commands.Cog):
     def __init__(self, bot):
@@ -19,27 +20,6 @@ class SlashCommands(commands.Cog):
 
     def is_admin(interaction: discord.Interaction) -> bool:
         return interaction.user.guild_permissions.administrator
-    
-    def is_admin_ctx(self, ctx):
-        """접두사 커맨드용 관리자 권한 확인"""
-        return ctx.author.guild_permissions.administrator
-
-    # 접두사 커맨드 pe 추가
-    @commands.command(name="pe")
-    async def pe_prefix(self, ctx, user_id: str):
-        """접두사 버전: $pe <user_id>"""
-        # 관리자 권한 확인
-        if not self.is_admin_ctx(ctx):
-            await ctx.send("🚫 이 명령어는 관리자만 사용할 수 있습니다.", delete_after=5)
-            return
-        
-        try:
-            queue_manager.add_user(int(user_id))
-            await ctx.send(f"✅ <@{user_id}> 대기열에 추가됨")
-        except ValueError:
-            await ctx.send("🚫 올바른 유저 ID를 입력해주세요.")
-        except Exception as e:
-            await ctx.send(f"🚫 오류 발생: `{str(e)}`")
 
     async def send_long_message_via_webhook(self, interaction: discord.Interaction, embeds_data):
         """웹훅을 통해 긴 메시지를 여러 개로 나누어 전송"""
@@ -76,15 +56,389 @@ class SlashCommands(commands.Cog):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="pe", description="유저를 인증 대기열에 추가")
-    @app_commands.describe(user_id="디스코드 유저 ID")
-    @app_commands.check(is_admin)
-    async def pe(self, interaction: discord.Interaction, user_id: str):
+    @app_commands.command(name="확인", description="자신의 국적을 확인하고 역할을 받습니다")
+    async def 확인(self, interaction: discord.Interaction):
+        """사용자 본인의 국적 확인 및 역할 부여"""
+        await interaction.response.defer(thinking=True)
+        
+        member = interaction.user
+        discord_id = member.id
+        
+        print(f"🔍 /확인 명령어 시작 - 사용자: {member.display_name} (ID: {discord_id})")
+        
         try:
-            queue_manager.add_user(int(user_id))
-            await interaction.response.send_message(f"✅ <@{user_id}> 대기열에 추가됨", ephemeral=True)
+            async with aiohttp.ClientSession() as session:
+                # 1단계: 디스코드 ID → 마크 ID
+                url1 = f"https://api.planetearth.kr/discord?discord={discord_id}"
+                print(f"  🔗 1단계 API 호출: {url1}")
+                
+                async with session.get(url1, timeout=aiohttp.ClientTimeout(total=10)) as r1:
+                    print(f"  📥 1단계 응답: HTTP {r1.status}")
+                    if r1.status != 200:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="❌ 확인 실패",
+                                description="마인크래프트 계정 정보를 찾을 수 없습니다.\n디스코드와 마인크래프트 계정이 연동되어 있는지 확인해주세요.",
+                                color=0xff0000
+                            ),
+                            ephemeral=True
+                        )
+                        return
+                    
+                    data1 = await r1.json()
+                    print(f"  📋 1단계 데이터: {data1}")
+                    
+                    if not data1.get('data') or not data1['data']:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="❌ 확인 실패",
+                                description="마인크래프트 계정 정보가 없습니다.\n디스코드와 마인크래프트 계정이 연동되어 있는지 확인해주세요.",
+                                color=0xff0000
+                            ),
+                            ephemeral=True
+                        )
+                        return
+                        
+                    mc_id = data1['data'][0].get('name')
+                    if not mc_id:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="❌ 확인 실패",
+                                description="마인크래프트 닉네임을 찾을 수 없습니다.",
+                                color=0xff0000
+                            ),
+                            ephemeral=True
+                        )
+                        return
+                    
+                    print(f"  ✅ 마크 ID 획득: {mc_id}")
+                    time.sleep(2)
+
+                # 2단계: 마크 ID → 마을
+                url2 = f"https://api.planetearth.kr/resident?name={mc_id}"
+                print(f"  🔗 2단계 API 호출: {url2}")
+                
+                async with session.get(url2, timeout=aiohttp.ClientTimeout(total=10)) as r2:
+                    print(f"  📥 2단계 응답: HTTP {r2.status}")
+                    if r2.status != 200:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="❌ 확인 실패",
+                                description=f"마을 정보를 조회할 수 없습니다.\n마인크래프트 닉네임: **{mc_id}**",
+                                color=0xff0000
+                            ),
+                            ephemeral=True
+                        )
+                        return
+                        
+                    data2 = await r2.json()
+                    print(f"  📋 2단계 데이터: {data2}")
+                    
+                    if not data2.get('data') or not data2['data']:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="❌ 확인 실패",
+                                description=f"마을에 소속되어 있지 않습니다.\n마인크래프트 닉네임: **{mc_id}**",
+                                color=0xff0000
+                            ),
+                            ephemeral=True
+                        )
+                        return
+                        
+                    town = data2['data'][0].get('town')
+                    if not town:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="❌ 확인 실패",
+                                description=f"마을 정보가 없습니다.\n마인크래프트 닉네임: **{mc_id}**",
+                                color=0xff0000
+                            ),
+                            ephemeral=True
+                        )
+                        return
+                    
+                    print(f"  ✅ 마을 획득: {town}")
+                    time.sleep(2)
+
+                # 3단계: 마을 → 국가
+                url3 = f"https://api.planetearth.kr/town?name={town}"
+                print(f"  🔗 3단계 API 호출: {url3}")
+                
+                async with session.get(url3, timeout=aiohttp.ClientTimeout(total=10)) as r3:
+                    print(f"  📥 3단계 응답: HTTP {r3.status}")
+                    if r3.status != 200:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="❌ 확인 실패",
+                                description=f"국가 정보를 조회할 수 없습니다.\n마을: **{town}**",
+                                color=0xff0000
+                            ),
+                            ephemeral=True
+                        )
+                        return
+                        
+                    data3 = await r3.json()
+                    print(f"  📋 3단계 데이터: {data3}")
+                    
+                    if not data3.get('data') or not data3['data']:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="❌ 확인 실패",
+                                description=f"국가에 소속되어 있지 않습니다.\n마을: **{town}**",
+                                color=0xff0000
+                            ),
+                            ephemeral=True
+                        )
+                        return
+                        
+                    nation = data3['data'][0].get('nation')
+                    if not nation:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="❌ 확인 실패",
+                                description=f"국가 정보가 없습니다.\n마을: **{town}**",
+                                color=0xff0000
+                            ),
+                            ephemeral=True
+                        )
+                        return
+                    
+                    print(f"  ✅ 국가 획득: {nation}")
+
+            # 역할 부여 및 닉네임 변경
+            guild = interaction.guild
+            member = guild.get_member(discord_id)
+            
+            if not member:
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="❌ 오류",
+                        description="서버에서 사용자를 찾을 수 없습니다.",
+                        color=0xff0000
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            # 새 닉네임 설정
+            new_nickname = f"{mc_id} ㅣ {nation}"
+            
+            try:
+                # 닉네임 변경
+                await member.edit(nick=new_nickname)
+                print(f"  ✅ 닉네임 변경: {new_nickname}")
+            except discord.Forbidden:
+                print(f"  ⚠️ 닉네임 변경 권한 없음")
+            except Exception as e:
+                print(f"  ⚠️ 닉네임 변경 실패: {e}")
+
+            # 역할 부여
+            role_added = None
+            role_removed = None
+            
+            if nation == BASE_NATION:
+                # 국민인 경우
+                if SUCCESS_ROLE_ID != 0:
+                    success_role = guild.get_role(SUCCESS_ROLE_ID)
+                    if success_role:
+                        try:
+                            await member.add_roles(success_role)
+                            role_added = success_role.name
+                            print(f"  ✅ 국민 역할 부여: {success_role.name}")
+                        except Exception as e:
+                            print(f"  ⚠️ 국민 역할 부여 실패: {e}")
+                
+                # 비국민 역할 제거
+                if SUCCESS_ROLE_ID_OUT != 0:
+                    out_role = guild.get_role(SUCCESS_ROLE_ID_OUT)
+                    if out_role and out_role in member.roles:
+                        try:
+                            await member.remove_roles(out_role)
+                            role_removed = out_role.name
+                            print(f"  ✅ 비국민 역할 제거: {out_role.name}")
+                        except Exception as e:
+                            print(f"  ⚠️ 비국민 역할 제거 실패: {e}")
+                
+                # 성공 메시지 (국민)
+                embed = discord.Embed(
+                    title="✅ 국민 확인 완료",
+                    description=f"**{BASE_NATION}** 국민으로 확인되었습니다!",
+                    color=0x00ff00
+                )
+                
+            else:
+                # 비국민인 경우
+                if SUCCESS_ROLE_ID_OUT != 0:
+                    out_role = guild.get_role(SUCCESS_ROLE_ID_OUT)
+                    if out_role:
+                        try:
+                            await member.add_roles(out_role)
+                            role_added = out_role.name
+                            print(f"  ✅ 비국민 역할 부여: {out_role.name}")
+                        except Exception as e:
+                            print(f"  ⚠️ 비국민 역할 부여 실패: {e}")
+                
+                # 국민 역할 제거
+                if SUCCESS_ROLE_ID != 0:
+                    success_role = guild.get_role(SUCCESS_ROLE_ID)
+                    if success_role and success_role in member.roles:
+                        try:
+                            await member.remove_roles(success_role)
+                            role_removed = success_role.name
+                            print(f"  ✅ 국민 역할 제거: {success_role.name}")
+                        except Exception as e:
+                            print(f"  ⚠️ 국민 역할 제거 실패: {e}")
+                
+                # 성공 메시지 (비국민)
+                embed = discord.Embed(
+                    title="⚠️ 다른 국가 소속",
+                    description=f"**{nation}** 국가에 소속되어 있습니다.",
+                    color=0xff9900
+                )
+
+            # 공통 정보 추가
+            embed.add_field(
+                name="🎮 마인크래프트 정보",
+                value=f"**닉네임:** {mc_id}\n**마을:** {town}\n**국가:** {nation}",
+                inline=False
+            )
+            
+            # 변경 사항 표시
+            changes = []
+            if role_added:
+                changes.append(f"• **{role_added}** 역할 추가됨")
+            if role_removed:
+                changes.append(f"• **{role_removed}** 역할 제거됨")
+            
+            try:
+                changes.append(f"• 닉네임이 **{new_nickname}**로 변경됨")
+            except:
+                pass
+                
+            if changes:
+                embed.add_field(
+                    name="🔄 변경 사항",
+                    value="\n".join(changes),
+                    inline=False
+                )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            print(f"🏁 /확인 처리 완료 - {member.display_name}: {nation}")
+
         except Exception as e:
-            await interaction.response.send_message(f"🚫 오류 발생: `{str(e)}`", ephemeral=True)
+            print(f"💥 /확인 예외 발생: {e}")
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="❌ 오류 발생",
+                    description=f"처리 중 오류가 발생했습니다.\n{str(e)[:100]}",
+                    color=0xff0000
+                ),
+                ephemeral=True
+            )
+
+    @app_commands.command(name="예외설정", description="자동실행 예외 대상을 관리합니다")
+    @app_commands.describe(
+        기능="수행할 작업을 선택하세요",
+        대상="(추가/제거 시만) 유저 멘션 또는 유저 ID"
+    )
+    @app_commands.check(is_admin)
+    async def 예외설정(
+        self,
+        interaction: discord.Interaction,
+        기능: Literal["추가", "제거", "목록"],
+        대상: str = None
+    ):
+        """자동실행 예외 대상 관리"""
+        
+        if 기능 == "목록":
+            # 예외 목록 표시
+            exceptions = exception_manager.get_exceptions()
+            
+            embed = discord.Embed(
+                title="📋 자동실행 예외 목록",
+                color=0x00bfff
+            )
+            
+            if not exceptions:
+                embed.description = "현재 예외 설정된 사용자가 없습니다."
+            else:
+                embed.description = f"총 **{len(exceptions)}명**이 예외 설정되어 있습니다."
+                
+                # 10명씩 나누어서 표시
+                for i in range(0, len(exceptions), 10):
+                    chunk = exceptions[i:i+10]
+                    mentions = [f"<@{user_id}>" for user_id in chunk]
+                    
+                    embed.add_field(
+                        name=f"예외 대상 ({i+1}-{min(i+10, len(exceptions))})",
+                        value="\n".join(mentions),
+                        inline=False
+                    )
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        # 추가/제거 시 대상이 필요함
+        if not 대상:
+            await interaction.response.send_message(
+                "❌ 추가/제거 기능을 사용할 때는 대상을 입력해야 합니다.\n"
+                "예: `/예외설정 기능:추가 대상:@사용자` 또는 `/예외설정 기능:추가 대상:123456789`",
+                ephemeral=True
+            )
+            return
+        
+        # 멘션 형식 처리 (< > 제거)
+        target_clean = 대상.replace('<@', '').replace('>', '').replace('!', '')
+        
+        try:
+            user_id = int(target_clean)
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ 올바른 사용자 ID 또는 멘션을 입력해주세요.\n"
+                "예: `@사용자` 또는 `123456789`",
+                ephemeral=True
+            )
+            return
+        
+        # 사용자 존재 확인
+        guild = interaction.guild
+        member = guild.get_member(user_id)
+        if not member:
+            await interaction.response.send_message(
+                f"❌ 사용자를 찾을 수 없습니다. (ID: {user_id})",
+                ephemeral=True
+            )
+            return
+        
+        if 기능 == "추가":
+            if exception_manager.add_exception(user_id):
+                embed = discord.Embed(
+                    title="✅ 예외 추가 완료",
+                    description=f"{member.mention}님을 자동실행 예외 목록에 추가했습니다.",
+                    color=0x00ff00
+                )
+            else:
+                embed = discord.Embed(
+                    title="⚠️ 이미 예외 설정됨",
+                    description=f"{member.mention}님은 이미 예외 목록에 있습니다.",
+                    color=0xffaa00
+                )
+        
+        elif 기능 == "제거":
+            if exception_manager.remove_exception(user_id):
+                embed = discord.Embed(
+                    title="✅ 예외 제거 완료",
+                    description=f"{member.mention}님을 자동실행 예외 목록에서 제거했습니다.",
+                    color=0x00ff00
+                )
+            else:
+                embed = discord.Embed(
+                    title="⚠️ 예외 목록에 없음",
+                    description=f"{member.mention}님은 예외 목록에 없습니다.",
+                    color=0xffaa00
+                )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="국민확인", description="디스코드 아이디를 이용해서 국민이 어떤 나라에 속해있는지 알려줍니다")
     @app_commands.describe(
@@ -216,55 +570,119 @@ class SlashCommands(commands.Cog):
         not_base_nation = []
         errors = []
 
+        print(f"🔍 /국민확인 명령어 시작 - 대상: {target_type} '{target_name}', 총 {len(members)}명")
+
         async with aiohttp.ClientSession() as session:
-            for member in members:
+            for idx, member in enumerate(members, 1):
                 discord_id = member.id
+                print(f"📋 [{idx}/{len(members)}] 처리 중: {member.display_name} (ID: {discord_id})")
 
                 try:
                     # 1단계: 디스코드 ID → 마크 ID
                     url1 = f"https://api.planetearth.kr/discord?discord={discord_id}"
+                    print(f"  🔗 1단계 API 호출: {url1}")
+                    
                     async with session.get(url1, timeout=aiohttp.ClientTimeout(total=10)) as r1:
+                        print(f"  📥 1단계 응답: HTTP {r1.status}")
                         if r1.status != 200:
-                            errors.append(f"{member.mention} - 마크ID 조회 실패 ({r1.status})")
+                            error_msg = f"마크ID 조회 실패 ({r1.status})"
+                            errors.append(f"{member.mention} - {error_msg}")
+                            print(f"  ❌ {error_msg}")
                             continue
+                        
                         data1 = await r1.json()
-                        mc_id = data1['data'][0]['name']
-                        if not mc_id:
-                            errors.append(f"{member.mention} - 마크ID 없음")
+                        print(f"  📋 1단계 데이터: {data1}")
+                        
+                        if not data1.get('data') or not data1['data']:
+                            error_msg = "마크ID 데이터 없음"
+                            errors.append(f"{member.mention} - {error_msg}")
+                            print(f"  ❌ {error_msg}")
                             continue
+                            
+                        mc_id = data1['data'][0].get('name')
+                        if not mc_id:
+                            error_msg = "마크ID 없음"
+                            errors.append(f"{member.mention} - {error_msg}")
+                            print(f"  ❌ {error_msg}")
+                            continue
+                        
+                        print(f"  ✅ 마크 ID 획득: {mc_id}")
                         time.sleep(5)
 
                     # 2단계: 마크 ID → 마을
                     url2 = f"https://api.planetearth.kr/resident?name={mc_id}"
+                    print(f"  🔗 2단계 API 호출: {url2}")
+                    
                     async with session.get(url2, timeout=aiohttp.ClientTimeout(total=10)) as r2:
+                        print(f"  📥 2단계 응답: HTTP {r2.status}")
                         if r2.status != 200:
-                            errors.append(f"{member.mention} (마크: {mc_id}) - 마을 조회 실패 ({r2.status})")
+                            error_msg = f"마을 조회 실패 ({r2.status})"
+                            errors.append(f"{member.mention} (마크: {mc_id}) - {error_msg}")
+                            print(f"  ❌ {error_msg}")
                             continue
+                            
                         data2 = await r2.json()
-                        town = data2['data'][0]['town']
-                        if not town:
-                            errors.append(f"{member.mention} (마크: {mc_id}) - 마을 없음")
+                        print(f"  📋 2단계 데이터: {data2}")
+                        
+                        if not data2.get('data') or not data2['data']:
+                            error_msg = "마을 데이터 없음"
+                            errors.append(f"{member.mention} (마크: {mc_id}) - {error_msg}")
+                            print(f"  ❌ {error_msg}")
                             continue
+                            
+                        town = data2['data'][0].get('town')
+                        if not town:
+                            error_msg = "마을 없음"
+                            errors.append(f"{member.mention} (마크: {mc_id}) - {error_msg}")
+                            print(f"  ❌ {error_msg}")
+                            continue
+                        
+                        print(f"  ✅ 마을 획득: {town}")
                         time.sleep(5)
 
                     # 3단계: 마을 → 국가
                     url3 = f"https://api.planetearth.kr/town?name={town}"
+                    print(f"  🔗 3단계 API 호출: {url3}")
+                    
                     async with session.get(url3, timeout=aiohttp.ClientTimeout(total=10)) as r3:
+                        print(f"  📥 3단계 응답: HTTP {r3.status}")
                         if r3.status != 200:
-                            errors.append(f"{member.mention} (마을: {town}) - 국가 조회 실패 ({r3.status})")
+                            error_msg = f"국가 조회 실패 ({r3.status})"
+                            errors.append(f"{member.mention} (마을: {town}) - {error_msg}")
+                            print(f"  ❌ {error_msg}")
                             continue
+                            
                         data3 = await r3.json()
-                        nation = data3['data'][0]['nation']
-                        if not nation:
-                            errors.append(f"{member.mention} (마을: {town}) - 국가 없음")
+                        print(f"  📋 3단계 데이터: {data3}")
+                        
+                        if not data3.get('data') or not data3['data']:
+                            error_msg = "국가 데이터 없음"
+                            errors.append(f"{member.mention} (마을: {town}) - {error_msg}")
+                            print(f"  ❌ {error_msg}")
                             continue
+                            
+                        nation = data3['data'][0].get('nation')
+                        if not nation:
+                            error_msg = "국가 없음"
+                            errors.append(f"{member.mention} (마을: {town}) - {error_msg}")
+                            print(f"  ❌ {error_msg}")
+                            continue
+                        
+                        print(f"  ✅ 국가 획득: {nation}")
                         time.sleep(5)
 
                         if nation != BASE_NATION:
                             not_base_nation.append(f"{member.mention} (국가: {nation}, 마크: {mc_id})")
+                            print(f"  ⚠️ 다른 국가 소속: {nation}")
+                        else:
+                            print(f"  ✅ {BASE_NATION} 국민 확인")
 
                 except Exception as e:
-                    errors.append(f"{member.mention} - 오류 발생: {str(e)[:50]}")
+                    error_msg = f"오류 발생: {str(e)[:50]}"
+                    errors.append(f"{member.mention} - {error_msg}")
+                    print(f"  💥 예외 발생: {e}")
+
+        print(f"🏁 /국민확인 처리 완료 - 총 {len(members)}명 중 다른국가: {len(not_base_nation)}명, 오류: {len(errors)}명")
 
         # 메시지를 여러 개의 임베드로 분할하여 준비
         embeds_data = []
@@ -402,21 +820,27 @@ class SlashCommands(commands.Cog):
             estimated_time = queue_size * 36  # 대략 배치당 36초 추정
             minutes = estimated_time // 60
             seconds = estimated_time % 60
-            ours = minutes // 60
+            hours = minutes // 60
+            
+            if hours > 0:
+                minutes = minutes % 60
+                time_str = f"약 {hours}시간 {minutes}분 {seconds}초"
+            elif minutes > 0:
+                time_str = f"약 {minutes}분 {seconds}초"
+            else:
+                time_str = f"약 {seconds}초"
 
-        if ours > 0:
-            time_str = f"약 {ours}시간 {minutes}분 {seconds}초"
-        elif minutes > 0:
-            time_str = f"약 {minutes}분 {seconds}초"
+            embed.add_field(
+                name="⏰ 예상 완료 시간",
+                value=time_str,
+                inline=True
+            )
         else:
-            time_str = f"약 {seconds}초"
-
-        embed.add_field(
-            name="⏰ 예상 완료 시간",
-            value=time_str,
-            inline=True
-        )
-
+            embed.add_field(
+                name="⏰ 예상 완료 시간",
+                value="대기열이 비어있습니다",
+                inline=True
+            )
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -446,15 +870,8 @@ class SlashCommands(commands.Cog):
         except Exception as e:
             await interaction.response.send_message(f"❌ 오류: {str(e)}", ephemeral=True)
 
-    # 접두사 커맨드 에러 핸들러
-    @pe_prefix.error
-    async def pe_prefix_error(self, ctx, error):
-        if isinstance(error, commands.CheckFailure):
-            await ctx.send("🚫 이 명령어는 관리자만 사용할 수 있습니다.", delete_after=5)
-        else:
-            await ctx.send(f"❗ 오류 발생: `{str(error)}`", delete_after=5)
-
-    @pe.error
+    @확인.error
+    @예외설정.error
     @국민확인.error  
     @대기열상태.error
     @대기열초기화.error
