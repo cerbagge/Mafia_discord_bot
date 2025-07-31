@@ -336,6 +336,214 @@ class SlashCommands(commands.Cog):
                 ephemeral=True
             )
 
+    @app_commands.command(name="테스트", description="봇의 기본 기능을 테스트합니다")
+    async def 테스트(self, interaction: discord.Interaction):
+        """봇 테스트 명령어"""
+        await interaction.response.defer(thinking=True)
+        
+        embed = discord.Embed(
+            title="🧪 봇 테스트 결과",
+            color=0x00ff00
+        )
+        
+        # 기본 정보
+        embed.add_field(
+            name="🤖 봇 정보",
+            value=f"**봇 이름:** {self.bot.user.name}\n**핑:** {round(self.bot.latency * 1000)}ms",
+            inline=False
+        )
+        
+        # 서버 정보
+        guild = interaction.guild
+        embed.add_field(
+            name="🏰 서버 정보",
+            value=f"**서버 이름:** {guild.name}\n**멤버 수:** {guild.member_count}명",
+            inline=False
+        )
+        
+        # 환경변수 확인
+        env_status = []
+        env_status.append(f"MC_API_BASE: {'✅' if MC_API_BASE else '❌'}")
+        env_status.append(f"BASE_NATION: {'✅' if BASE_NATION else '❌'}")
+        env_status.append(f"SUCCESS_ROLE_ID: {'✅' if SUCCESS_ROLE_ID != 0 else '❌'}")
+        
+        embed.add_field(
+            name="⚙️ 환경변수 상태",
+            value="\n".join(env_status),
+            inline=False
+        )
+        
+        # 대기열 상태
+        queue_size = queue_manager.get_queue_size()
+        is_processing = queue_manager.is_processing()
+        
+        embed.add_field(
+            name="📋 대기열 상태",
+            value=f"**대기 중:** {queue_size}명\n**처리 상태:** {'🔄 처리 중' if is_processing else '⏸️ 대기 중'}",
+            inline=False
+        )
+        
+        # 예외 관리자 상태
+        exception_count = len(exception_manager.get_exceptions())
+        embed.add_field(
+            name="🚫 예외 관리자",
+            value=f"**예외 사용자:** {exception_count}명",
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="스케줄확인", description="자동 실행 스케줄 정보를 확인합니다")
+    @app_commands.check(is_admin)
+    async def 스케줄확인(self, interaction: discord.Interaction):
+        """스케줄러 상태 확인"""
+        try:
+            from scheduler import get_scheduler_info
+            
+            info = get_scheduler_info()
+            
+            embed = discord.Embed(
+                title="📅 자동 실행 스케줄 정보",
+                color=0x00ff00 if info["running"] else 0xff0000
+            )
+            
+            # 스케줄러 상태
+            status = "🟢 실행 중" if info["running"] else "🔴 중지됨"
+            embed.add_field(
+                name="⚙️ 스케줄러 상태",
+                value=status,
+                inline=False
+            )
+            
+            # 자동 실행 설정
+            day_names = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+            day_name = day_names[info["auto_execution_day"]]
+            
+            embed.add_field(
+                name="🕒 자동 실행 스케줄",
+                value=f"**매주 {day_name}** {info['auto_execution_hour']:02d}:{info['auto_execution_minute']:02d}",
+                inline=False
+            )
+            
+            # 등록된 작업들
+            if info["jobs"]:
+                job_list = []
+                for job in info["jobs"]:
+                    job_list.append(f"• **{job['name']}**\n  다음 실행: {job['next_run']}")
+                
+                embed.add_field(
+                    name="📋 등록된 작업",
+                    value="\n\n".join(job_list),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="📋 등록된 작업",
+                    value="등록된 작업이 없습니다.",
+                    inline=False
+                )
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+        except ImportError:
+            embed = discord.Embed(
+                title="❌ 오류",
+                description="scheduler 모듈을 로드할 수 없습니다.",
+                color=0xff0000
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ 오류 발생",
+                description=f"스케줄 정보를 가져오는 중 오류가 발생했습니다.\n{str(e)}",
+                color=0xff0000
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="자동실행시작", description="자동 역할 부여를 수동으로 시작합니다")
+    @app_commands.check(is_admin)
+    async def 자동실행시작(self, interaction: discord.Interaction):
+        """자동 역할 부여를 수동으로 실행"""
+        await interaction.response.defer(thinking=True)
+        
+        try:
+            from scheduler import manual_execute_auto_roles
+            
+            # 현재 대기열 상태 확인
+            current_queue_size = queue_manager.get_queue_size()
+            
+            embed = discord.Embed(
+                title="🚀 자동 역할 실행 시작",
+                description="auto_roles.txt 파일의 역할 멤버들을 대기열에 추가하고 있습니다...",
+                color=0xffaa00
+            )
+            
+            embed.add_field(
+                name="📋 현재 상태",
+                value=f"기존 대기열: **{current_queue_size}명**",
+                inline=False
+            )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            # 자동 역할 실행
+            result = await manual_execute_auto_roles(self.bot)
+            
+            if result["success"]:
+                embed = discord.Embed(
+                    title="✅ 자동 역할 실행 완료",
+                    description=result["message"],
+                    color=0x00ff00
+                )
+                
+                new_queue_size = queue_manager.get_queue_size()
+                
+                embed.add_field(
+                    name="📊 결과",
+                    value=f"• 추가된 사용자: **{result.get('added_count', 0)}명**\n• 현재 대기열: **{new_queue_size}명**",
+                    inline=False
+                )
+                
+                if new_queue_size > 0:
+                    estimated_time = new_queue_size * 36  # 대략 배치당 36초 추정
+                    minutes = estimated_time // 60
+                    seconds = estimated_time % 60
+                    
+                    if minutes > 0:
+                        time_str = f"약 {minutes}분 {seconds}초"
+                    else:
+                        time_str = f"약 {seconds}초"
+                    
+                    embed.add_field(
+                        name="⏰ 예상 완료 시간",
+                        value=time_str,
+                        inline=False
+                    )
+            else:
+                embed = discord.Embed(
+                    title="❌ 자동 역할 실행 실패",
+                    description=result["message"],
+                    color=0xff0000
+                )
+            
+            # 새로운 메시지로 결과 전송
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except ImportError:
+            embed = discord.Embed(
+                title="❌ 오류",
+                description="scheduler 모듈을 로드할 수 없습니다.",
+                color=0xff0000
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ 오류 발생",
+                description=f"자동 역할 실행 중 오류가 발생했습니다.\n{str(e)}",
+                color=0xff0000
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
     @app_commands.command(name="예외설정", description="자동실행 예외 대상을 관리합니다")
     @app_commands.describe(
         기능="수행할 작업을 선택하세요",
@@ -871,6 +1079,9 @@ class SlashCommands(commands.Cog):
             await interaction.response.send_message(f"❌ 오류: {str(e)}", ephemeral=True)
 
     @확인.error
+    @테스트.error
+    @스케줄확인.error
+    @자동실행시작.error
     @예외설정.error
     @국민확인.error  
     @대기열상태.error
