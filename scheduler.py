@@ -1,891 +1,802 @@
-import os
-import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
+from datetime import datetime, timezone, timedelta
 import discord
 import aiohttp
-import json
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from queue_manager import queue_manager
-from role_manager import assign_role_and_nick
+import os
 import time
+import re
 
-# 예외 사용자 파일 경로
-EXCEPTION_USERS_FILE = "exception_users.json"
+from queue_manager import queue_manager
+from exception_manager import exception_manager
 
-def get_env_int(key, default=None):
-    value = os.getenv(key)
-    if value is None:
-        if default is not None:
-            return default
-        raise ValueError(f"환경변수 {key}가 설정되지 않았습니다.")
+# config.py에서 환경변수 가져오기
+try:
+    from config import config
+    MC_API_BASE = config.MC_API_BASE
+    BASE_NATION = config.BASE_NATION
+    SUCCESS_ROLE_ID = config.SUCCESS_ROLE_ID
+    SUCCESS_ROLE_ID_OUT = getattr(config, 'SUCCESS_ROLE_ID_OUT', 0)
+    SUCCESS_CHANNEL_ID = config.SUCCESS_CHANNEL_ID
+    FAILURE_CHANNEL_ID = config.FAILURE_CHANNEL_ID
+    AUTO_EXECUTION_DAY = config.AUTO_EXECUTION_DAY
+    AUTO_EXECUTION_HOUR = config.AUTO_EXECUTION_HOUR
+    AUTO_EXECUTION_MINUTE = config.AUTO_EXECUTION_MINUTE
+    print("✅ scheduler.py: config.py에서 환경변수 로드 완료")
+except ImportError:
+    # config.py가 없으면 직접 환경변수 로드
+    print("⚠️ config.py를 찾을 수 없어 직접 환경변수를 로드합니다.")
+    MC_API_BASE = os.getenv("MC_API_BASE", "https://api.planetearth.kr")
+    BASE_NATION = os.getenv("BASE_NATION", "Red_Mafia")
+    SUCCESS_ROLE_ID = int(os.getenv("SUCCESS_ROLE_ID", "0"))
+    SUCCESS_ROLE_ID_OUT = int(os.getenv("SUCCESS_ROLE_ID_OUT", "0"))
+    SUCCESS_CHANNEL_ID = int(os.getenv("SUCCESS_CHANNEL_ID", "0"))
+    FAILURE_CHANNEL_ID = int(os.getenv("FAILURE_CHANNEL_ID", "0"))
+    AUTO_EXECUTION_DAY = int(os.getenv("AUTO_EXECUTION_DAY", "2"))
+    AUTO_EXECUTION_HOUR = int(os.getenv("AUTO_EXECUTION_HOUR", "3"))
+    AUTO_EXECUTION_MINUTE = int(os.getenv("AUTO_EXECUTION_MINUTE", "24"))
+
+# 스케줄러 인스턴스
+scheduler = AsyncIOScheduler(timezone='Asia/Seoul')
+
+def is_exception_user(user_id: int) -> bool:
+    """예외 사용자 확인 함수 (main.py에서 사용)"""
     try:
-        return int(value)
-    except ValueError:
-        raise ValueError(f"환경변수 {key}의 값 '{value}'을(를) 정수로 변환할 수 없습니다.")
-
-class RateLimiter:
-    def __init__(self, max_requests=70, time_window=900):
-        self.max_requests = max_requests
-        self.time_window = time_window
-        self.requests = []
-    
-    def can_make_request(self):
-        now = time.time()
-        self.requests = [req_time for req_time in self.requests if now - req_time < self.time_window]
-        return len(self.requests) < self.max_requests
-    
-    def record_request(self):
-        self.requests.append(time.time())
-    
-    def get_wait_time(self):
-        if not self.requests:
-            return 0
-        oldest_request = min(self.requests)
-        return max(0, self.time_window - (time.time() - oldest_request))
-
-# 예외 사용자 관리 함수들 - 디버깅 로그 추가
-def load_exception_users():
-    """예외 사용자 목록을 JSON 파일에서 로드"""
-    try:
-        if os.path.exists(EXCEPTION_USERS_FILE):
-            print(f"🔍 예외 사용자 파일 로드 시도: {EXCEPTION_USERS_FILE}")
-            with open(EXCEPTION_USERS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                exception_users = set(data.get("exception_users", []))
-                print(f"📋 예외 사용자 로드 완료: {len(exception_users)}명 - {list(exception_users)}")
-                return exception_users
-        else:
-            print(f"⚠️ 예외 사용자 파일이 존재하지 않음: {EXCEPTION_USERS_FILE}")
-            return set()
+        return exception_manager.is_exception(user_id)
     except Exception as e:
-        print(f"❌ 예외 사용자 파일 로드 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        return set()
-
-def save_exception_users(exception_users):
-    """예외 사용자 목록을 JSON 파일에 저장"""
-    try:
-        print(f"💾 예외 사용자 파일 저장 시도: {len(exception_users)}명 - {list(exception_users)}")
-        
-        # 디렉토리 생성 (필요한 경우)
-        os.makedirs(os.path.dirname(EXCEPTION_USERS_FILE) if os.path.dirname(EXCEPTION_USERS_FILE) else '.', exist_ok=True)
-        
-        data = {"exception_users": list(exception_users)}
-        with open(EXCEPTION_USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        print(f"✅ 예외 사용자 파일 저장 완료: {EXCEPTION_USERS_FILE}")
-        return True
-    except Exception as e:
-        print(f"❌ 예외 사용자 파일 저장 오류: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"⚠️ 예외 사용자 확인 오류: {e}")
         return False
 
-def add_exception_user(user_id):
-    """예외 사용자 추가"""
-    try:
-        print(f"➕ 예외 사용자 추가 시도: {user_id}")
-        exception_users = load_exception_users()
-        user_id_str = str(user_id)
-        
-        if user_id_str in exception_users:
-            print(f"⚠️ 이미 예외 목록에 있는 사용자: {user_id}")
-            return True  # 이미 있어도 성공으로 처리
-            
-        exception_users.add(user_id_str)
-        result = save_exception_users(exception_users)
-        
-        if result:
-            print(f"✅ 예외 사용자 추가 완료: {user_id}")
-        else:
-            print(f"❌ 예외 사용자 추가 실패: {user_id}")
-            
-        return result
-    except Exception as e:
-        print(f"❌ 예외 사용자 추가 중 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+def setup_scheduler(bot):
+    """스케줄러 설정 함수 (main.py에서 호출)"""
+    start_scheduler(bot)
 
-def remove_exception_user(user_id):
-    """예외 사용자 제거"""
+def get_scheduler_info():
+    """스케줄러 상태 정보를 반환"""
     try:
-        print(f"➖ 예외 사용자 제거 시도: {user_id}")
-        exception_users = load_exception_users()
-        user_id_str = str(user_id)
+        # 스케줄러 실행 상태
+        running = scheduler.running
         
-        if user_id_str not in exception_users:
-            print(f"⚠️ 예외 목록에 없는 사용자: {user_id}")
-            return True  # 없어도 성공으로 처리
-            
-        exception_users.discard(user_id_str)
-        result = save_exception_users(exception_users)
-        
-        if result:
-            print(f"✅ 예외 사용자 제거 완료: {user_id}")
-        else:
-            print(f"❌ 예외 사용자 제거 실패: {user_id}")
-            
-        return result
-    except Exception as e:
-        print(f"❌ 예외 사용자 제거 중 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-def is_exception_user(user_id):
-    """사용자가 예외 목록에 있는지 확인"""
-    try:
-        exception_users = load_exception_users()
-        user_id_str = str(user_id)
-        is_exception = user_id_str in exception_users
-        print(f"🔍 예외 사용자 확인: {user_id} -> {is_exception}")
-        return is_exception
-    except Exception as e:
-        print(f"❌ 예외 사용자 확인 중 오류: {e}")
-        return False
-
-def get_exception_users_list():
-    """예외 사용자 목록 반환"""
-    try:
-        exception_users = load_exception_users()
-        users_list = list(exception_users)
-        print(f"📋 예외 사용자 목록 반환: {len(users_list)}명 - {users_list}")
-        return users_list
-    except Exception as e:
-        print(f"❌ 예외 사용자 목록 반환 중 오류: {e}")
-        return []
-
-async def remove_roles_and_reset_nick(member):
-    try:
-        roles_to_remove = [role for role in member.roles if not role.managed and role.name != "@everyone"]
-        await member.remove_roles(*roles_to_remove, reason="국가 불일치로 역할 제거")
-        await member.edit(nick=None)
-    except Exception as e:
-        print(f"❌ 역할 제거 실패: {member.display_name} - {e}")
-
-async def update_nickname_with_nation(member: discord.Member, mc_id: str, nation: str):
-    """Red_Mafia가 아닌 국가의 경우 닉네임을 '마크닉 ㅣ 국가'로 변경, Red_Mafia는 마크닉만 교체"""
-    try:
-        BASE_NATION = os.getenv("BASE_NATION", "Red_Mafia")
-        
-        # 역할 ID 가져오기
-        try:
-            SUCCESS_ROLE_ID = get_env_int("SUCCESS_ROLE_ID")
-            SUCCESS_ROLE_ID_OUT = get_env_int("SUCCESS_ROLE_ID_OUT")
-        except ValueError as e:
-            print(f"❌ 역할 ID 환경변수 오류: {e}")
-            SUCCESS_ROLE_ID = None
-            SUCCESS_ROLE_ID_OUT = None
-        
-        # Red_Mafia 국민이면 기존 닉네임에서 마크닉네임 부분만 교체
-        if nation == BASE_NATION:
-            current_nick = member.display_name
-            
-            # 기존 닉네임이 '마크닉 ㅣ 콜사인' 형태인지 확인
-            if " ㅣ " in current_nick:
-                # 기존 콜사인 부분 유지하고 마크닉네임만 교체
-                callsign_part = current_nick.split(" ㅣ ", 1)[1]  # 첫 번째 구분자 이후 모든 내용
-                new_nickname = f"{mc_id} ㅣ {callsign_part}"
+        # 등록된 작업들
+        jobs = []
+        for job in scheduler.get_jobs():
+            # 다음 실행 시간을 한국 시간으로 변환
+            if job.next_run_time:
+                kst = timezone(timedelta(hours=9))
+                next_run = job.next_run_time.astimezone(kst).strftime("%Y-%m-%d %H:%M:%S KST")
             else:
-                # 기존 닉네임이 형태에 맞지 않으면 기본 형태로 설정
-                new_nickname = f"{mc_id} ㅣ Red_Mafia"
+                next_run = "없음"
             
-            # 닉네임이 32자를 초과하지 않도록 제한
-            if len(new_nickname) > 32:
-                if " ㅣ " in current_nick:
-                    callsign_part = current_nick.split(" ㅣ ", 1)[1]
-                    max_mc_id_length = 32 - len(" ㅣ ") - len(callsign_part)
-                    if max_mc_id_length > 0:
-                        truncated_mc_id = mc_id[:max_mc_id_length]
-                        new_nickname = f"{truncated_mc_id} ㅣ {callsign_part}"
-                    else:
-                        new_nickname = mc_id[:32]
-                else:
-                    new_nickname = mc_id[:32]
+            jobs.append({
+                "id": job.id,
+                "name": job.name or job.id,
+                "next_run": next_run
+            })
+        
+        return {
+            "running": running,
+            "jobs": jobs,
+            "auto_execution_day": AUTO_EXECUTION_DAY,
+            "auto_execution_hour": AUTO_EXECUTION_HOUR,
+            "auto_execution_minute": AUTO_EXECUTION_MINUTE
+        }
+    except Exception as e:
+        print(f"스케줄러 정보 조회 오류: {e}")
+        return {
+            "running": False,
+            "jobs": [],
+            "auto_execution_day": AUTO_EXECUTION_DAY,
+            "auto_execution_hour": AUTO_EXECUTION_HOUR,
+            "auto_execution_minute": AUTO_EXECUTION_MINUTE
+        }
+
+def abbreviate_nation_name(nation_name: str) -> str:
+    """국가 이름을 축약하는 함수"""
+    # 언더스코어로 분리된 단어들의 첫 글자만 가져오기
+    parts = nation_name.split('_')
+    if len(parts) <= 1:
+        # 언더스코어가 없으면 대문자만 추출 (CamelCase 처리)
+        capital_letters = re.findall(r'[A-Z]', nation_name)
+        if capital_letters:
+            return '.'.join(capital_letters)
+        else:
+            # 대문자가 없으면 처음 5글자만
+            return nation_name[:5]
+    else:
+        # 각 단어의 첫 글자를 점으로 연결
+        abbreviated = '.'.join([part[0].upper() for part in parts if part])
+        return abbreviated
+
+def create_nickname(mc_id: str, nation: str, current_nickname: str = None) -> str:
+    """닉네임 생성 함수"""
+    # Discord 닉네임 최대 길이
+    MAX_LENGTH = 32
+    SEPARATOR = " ㅣ "
+    
+    if nation == BASE_NATION:
+        # BASE_NATION인 경우 기존 콜사인 유지 시도
+        if current_nickname and " ㅣ " in current_nickname:
+            # 현재 닉네임에서 콜사인 부분 추출
+            parts = current_nickname.split(" ㅣ ")
+            if len(parts) >= 2:
+                current_callsign = parts[1]
+                # 마크 닉네임이 현재 닉네임의 첫 부분과 일치하는지 확인
+                if parts[0] == mc_id:
+                    # 기존 콜사인 유지
+                    new_nickname = f"{mc_id}{SEPARATOR}{current_callsign}"
+                    if len(new_nickname) <= MAX_LENGTH:
+                        return new_nickname
+        
+        # 기존 콜사인이 없거나 길이 초과인 경우 국가명 사용
+        callsign = nation
+    else:
+        # 다른 국가인 경우 국가명 사용
+        callsign = nation
+    
+    # 기본 닉네임 생성
+    base_nickname = f"{mc_id}{SEPARATOR}{callsign}"
+    
+    # 길이 확인
+    if len(base_nickname) <= MAX_LENGTH:
+        return base_nickname
+    
+    # 길이 초과 시 국가명 축약
+    abbreviated_nation = abbreviate_nation_name(callsign)
+    abbreviated_nickname = f"{mc_id}{SEPARATOR}{abbreviated_nation}"
+    
+    # 축약해도 길이 초과인 경우
+    if len(abbreviated_nickname) > MAX_LENGTH:
+        # 마크 닉네임을 우선시하고 국가 부분을 더 축약
+        available_length = MAX_LENGTH - len(mc_id) - len(SEPARATOR)
+        if available_length > 0:
+            truncated_nation = abbreviated_nation[:available_length]
+            return f"{mc_id}{SEPARATOR}{truncated_nation}"
+        else:
+            # 극단적인 경우 마크 닉네임만
+            return mc_id[:MAX_LENGTH]
+    
+    return abbreviated_nickname
+
+async def send_log_message(bot, channel_id: int, embed: discord.Embed):
+    """로그 메시지를 지정된 채널에 전송"""
+    try:
+        if channel_id == 0:
+            print("⚠️ 채널 ID가 설정되지 않았습니다.")
+            return
             
-            # Red_Mafia 국민 역할 처리: SUCCESS_ROLE_ID_OUT 제거, SUCCESS_ROLE_ID 추가
-            roles_to_add = []
-            roles_to_remove = []
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            print(f"⚠️ 채널을 찾을 수 없습니다: {channel_id}")
+            return
             
-            if SUCCESS_ROLE_ID:
-                in_role = member.guild.get_role(SUCCESS_ROLE_ID)
-                if in_role and in_role not in member.roles:
-                    roles_to_add.append(in_role)
+        await channel.send(embed=embed)
+        print(f"📨 로그 메시지 전송됨: {channel.name}")
+        
+    except Exception as e:
+        print(f"❌ 로그 메시지 전송 실패: {e}")
+
+async def manual_execute_auto_roles(bot):
+    """자동 역할 부여를 수동으로 실행"""
+    try:
+        print("🎯 수동 자동 역할 실행 시작")
+        
+        # auto_roles.txt 파일 확인
+        auto_roles_path = "auto_roles.txt"
+        if not os.path.exists(auto_roles_path):
+            return {
+                "success": False,
+                "message": "auto_roles.txt 파일이 존재하지 않습니다."
+            }
+        
+        # 역할 ID 읽기
+        with open(auto_roles_path, "r") as f:
+            role_ids = [line.strip() for line in f.readlines() if line.strip()]
+        
+        if not role_ids:
+            return {
+                "success": False,
+                "message": "auto_roles.txt 파일에 역할 ID가 없습니다."
+            }
+        
+        added_count = 0
+        
+        # 각 길드에서 역할 멤버들을 대기열에 추가
+        for guild in bot.guilds:
+            print(f"🏰 길드 처리: {guild.name}")
             
-            if SUCCESS_ROLE_ID_OUT:
-                out_role = member.guild.get_role(SUCCESS_ROLE_ID_OUT)
-                if out_role and out_role in member.roles:
-                    roles_to_remove.append(out_role)
-            
-            # 역할 추가
-            if roles_to_add:
-                await member.add_roles(*roles_to_add, reason="Red_Mafia 국민 역할 부여")
-                role_names = [role.name for role in roles_to_add]
-                print(f"✅ {member.display_name}에게 역할 추가: {', '.join(role_names)}")
-            
-            # 역할 제거
-            if roles_to_remove:
-                await member.remove_roles(*roles_to_remove, reason="Red_Mafia 국민이므로 외국인 역할 제거")
-                role_names = [role.name for role in roles_to_remove]
-                print(f"🗑️ {member.display_name}에게서 역할 제거: {', '.join(role_names)}")
-            
-            # 닉네임 변경
-            if member.display_name != new_nickname:
-                await member.edit(nick=new_nickname)
-                print(f"✅ Red_Mafia 국민: {member.display_name} 닉네임을 '{new_nickname}'으로 변경 (마크닉만 교체)")
-            else:
-                print(f"ℹ️ Red_Mafia 국민: {member.display_name}의 닉네임이 이미 '{new_nickname}'입니다.")
+            for role_id_str in role_ids:
+                try:
+                    role_id = int(role_id_str)
+                    role = guild.get_role(role_id)
+                    
+                    if not role:
+                        print(f"⚠️ 역할을 찾을 수 없음: {role_id}")
+                        continue
+                    
+                    print(f"👥 역할 '{role.name}' 멤버 {len(role.members)}명 처리 중")
+                    
+                    for member in role.members:
+                        # 예외 목록 확인
+                        if exception_manager.is_exception(member.id):
+                            print(f"  ⏭️ 예외 대상 건너뜀: {member.display_name}")
+                            continue
+                        
+                        # 대기열에 추가
+                        if queue_manager.add_user(member.id):
+                            added_count += 1
+                            print(f"  ➕ 대기열 추가: {member.display_name}")
+                        else:
+                            print(f"  ⏭️ 이미 대기열에 있음: {member.display_name}")
+                    
+                except ValueError:
+                    print(f"⚠️ 잘못된 역할 ID 형식: {role_id_str}")
+                    continue
+                except Exception as e:
+                    print(f"⚠️ 역할 처리 오류 ({role_id_str}): {e}")
+                    continue
+        
+        print(f"✅ 자동 역할 실행 완료 - {added_count}명 대기열 추가")
+        
+        # 자동 역할 실행 완료 로그 전송
+        embed = discord.Embed(
+            title="🎯 자동 역할 실행 완료",
+            description=f"**{added_count}명**이 대기열에 추가되었습니다.",
+            color=0x00ff00
+        )
+        
+        embed.add_field(
+            name="📋 처리된 역할",
+            value=", ".join([f"<@&{role_id.strip()}>" for role_id in role_ids]) if role_ids else "없음",
+            inline=False
+        )
+        
+        current_queue_size = queue_manager.get_queue_size()
+        embed.add_field(
+            name="📊 대기열 현황",
+            value=f"현재 대기 중: **{current_queue_size}명**",
+            inline=False
+        )
+        
+        if current_queue_size > 0:
+            estimated_minutes = (current_queue_size * 36) // 60  # 배치당 36초 예상
+            embed.add_field(
+                name="⏰ 예상 완료 시간",
+                value=f"약 {estimated_minutes}분 후" if estimated_minutes > 0 else "1분 이내",
+                inline=False
+            )
+        
+        embed.timestamp = datetime.now()
+        
+        await send_log_message(bot, SUCCESS_CHANNEL_ID, embed)
+        
+        return {
+            "success": True,
+            "message": f"{added_count}명이 대기열에 추가되었습니다.",
+            "added_count": added_count
+        }
+        
+    except Exception as e:
+        print(f"❌ 자동 역할 실행 오류: {e}")
+        
+        # 자동 역할 실행 실패 로그 전송
+        embed = discord.Embed(
+            title="❌ 자동 역할 실행 실패",
+            description="자동 역할 실행 중 오류가 발생했습니다.",
+            color=0xff0000
+        )
+        
+        embed.add_field(
+            name="❌ 오류 내용",
+            value=str(e)[:1000],
+            inline=False
+        )
+        
+        embed.timestamp = datetime.now()
+        
+        await send_log_message(bot, FAILURE_CHANNEL_ID, embed)
+        
+        return {
+            "success": False,
+            "message": f"실행 중 오류 발생: {str(e)}"
+        }
+
+def start_scheduler(bot):
+    """스케줄러 시작"""
+    try:
+        print("🚀 스케줄러 시작")
+        
+        # 대기열 처리 작업 (1분마다)
+        scheduler.add_job(
+            process_queue_batch,
+            trigger=IntervalTrigger(minutes=1),
+            args=[bot],
+            id="queue_processor",
+            name="대기열 처리",
+            replace_existing=True
+        )
+        
+        # 자동 역할 실행 작업 (매주 지정된 요일과 시간에)
+        # 요일: 월(0), 화(1), 수(2), 목(3), 금(4), 토(5), 일(6)
+        day_names = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+        day_name = day_names[AUTO_EXECUTION_DAY]
+        
+        scheduler.add_job(
+            execute_auto_roles,
+            trigger=CronTrigger(
+                day_of_week=AUTO_EXECUTION_DAY,
+                hour=AUTO_EXECUTION_HOUR,
+                minute=AUTO_EXECUTION_MINUTE,
+                timezone='Asia/Seoul'
+            ),
+            args=[bot],
+            id="auto_roles_execution",
+            name="자동 역할 실행",
+            replace_existing=True
+        )
+        
+        scheduler.start()
+        
+        print("✅ 스케줄러 시작 완료")
+        print(f"   📋 대기열 처리: 1분마다")
+        print(f"   🎯 자동 역할 실행: 매주 {day_name} {AUTO_EXECUTION_HOUR:02d}:{AUTO_EXECUTION_MINUTE:02d}")
+        
+    except Exception as e:
+        print(f"❌ 스케줄러 시작 실패: {e}")
+
+def stop_scheduler():
+    """스케줄러 중지"""
+    try:
+        if scheduler.running:
+            scheduler.shutdown()
+            print("🛑 스케줄러 중지 완료")
+    except Exception as e:
+        print(f"❌ 스케줄러 중지 실패: {e}")
+
+async def process_queue_batch(bot):
+    """대기열에서 사용자들을 배치로 처리"""
+    try:
+        if queue_manager.get_queue_size() == 0:
             return
         
-        # 다른 국가면 '마크닉 ㅣ 국가' 형태로 변경
-        new_nickname = f"{mc_id} ㅣ {nation}"
+        print("🔄 대기열 배치 처리 시작")
+        queue_manager.processing = True
         
-        # 닉네임이 32자를 초과하지 않도록 제한
-        if len(new_nickname) > 32:
-            max_mc_id_length = 32 - len(" ㅣ ") - len(nation)
-            if max_mc_id_length > 0:
-                truncated_mc_id = mc_id[:max_mc_id_length]
-                new_nickname = f"{truncated_mc_id} ㅣ {nation}"
-            else:
-                new_nickname = mc_id[:32]  # 최소한 마크 닉네임만
+        # 배치 크기 (한 번에 처리할 사용자 수)
+        batch_size = 3
+        processed_users = []
         
-        # 다른 국가 국민 역할 처리: SUCCESS_ROLE_ID 제거, SUCCESS_ROLE_ID_OUT 추가
-        roles_to_add = []
-        roles_to_remove = []
+        for _ in range(batch_size):
+            user_id = queue_manager.get_next()
+            if user_id is None:
+                break
+            processed_users.append(user_id)
         
-        if SUCCESS_ROLE_ID_OUT:
-            out_role = member.guild.get_role(SUCCESS_ROLE_ID_OUT)
-            if out_role and out_role not in member.roles:
-                roles_to_add.append(out_role)
+        if not processed_users:
+            queue_manager.processing = False
+            return
         
-        if SUCCESS_ROLE_ID:
-            in_role = member.guild.get_role(SUCCESS_ROLE_ID)
-            if in_role and in_role in member.roles:
-                roles_to_remove.append(in_role)
+        print(f"📋 배치 처리 대상: {len(processed_users)}명")
         
-        # 역할 추가
-        if roles_to_add:
-            await member.add_roles(*roles_to_add, reason="외국 국민 역할 부여")
-            role_names = [role.name for role in roles_to_add]
-            print(f"✅ {member.display_name}에게 역할 추가: {', '.join(role_names)}")
+        # API 세션 생성
+        async with aiohttp.ClientSession() as session:
+            for user_id in processed_users:
+                try:
+                    await process_single_user(bot, session, user_id)
+                    time.sleep(10)  # API 제한을 위한 대기
+                except Exception as e:
+                    print(f"❌ 사용자 {user_id} 처리 실패: {e}")
         
-        # 역할 제거
-        if roles_to_remove:
-            await member.remove_roles(*roles_to_remove, reason="외국 국민이므로 Red_Mafia 역할 제거")
-            role_names = [role.name for role in roles_to_remove]
-            print(f"🗑️ {member.display_name}에게서 역할 제거: {', '.join(role_names)}")
+        print(f"✅ 배치 처리 완료: {len(processed_users)}명")
         
-        # 닉네임 변경
-        if member.display_name != new_nickname:
-            await member.edit(nick=new_nickname)
-            print(f"✅ 다른 국가 국민: {member.display_name} 닉네임을 '{new_nickname}'으로 변경")
-        else:
-            print(f"ℹ️ {member.display_name}의 닉네임이 이미 '{new_nickname}'입니다.")
-            
-    except discord.Forbidden:
-        print(f"❌ {member.display_name}에 대한 권한이 없습니다 (닉네임/역할 변경 실패)")
-    except discord.HTTPException as e:
-        print(f"❌ Discord API 오류 ({member.display_name}): {e}")
     except Exception as e:
-        print(f"❌ 예상치 못한 오류 ({member.display_name}): {e}")
+        print(f"❌ 배치 처리 오류: {e}")
+    finally:
+        queue_manager.processing = False
 
-async def get_user_info_by_name(session, discord_id, rate_limiter):
-    """3단계 API 호출로 사용자 정보 조회: Discord ID → 마크 ID → 마을 → 국가"""
+async def process_single_user(bot, session, user_id):
+    """단일 사용자 처리"""
+    member = None
+    guild = None
+    mc_id = None
+    nation = None
+    town = None
+    error_message = None
     
     try:
-        # Rate limiting 체크
-        if not rate_limiter.can_make_request():
-            wait_time = rate_limiter.get_wait_time()
-            print(f"⏳ Rate Limit 도달, {wait_time:.1f}초 대기 중...")
-            await asyncio.sleep(wait_time)
+        print(f"👤 사용자 처리 시작: {user_id}")
+        
+        # 모든 길드에서 해당 사용자 찾기
+        for g in bot.guilds:
+            m = g.get_member(user_id)
+            if m:
+                member = m
+                guild = g
+                break
+        
+        if not member or not guild:
+            error_message = "서버에서 사용자를 찾을 수 없습니다."
+            print(f"⚠️ {error_message}: {user_id}")
+            
+            # 실패 로그 전송
+            embed = discord.Embed(
+                title="❌ 사용자 처리 실패",
+                description=f"**사용자 ID:** {user_id}",
+                color=0xff0000
+            )
+            embed.add_field(
+                name="❌ 오류",
+                value=error_message,
+                inline=False
+            )
+            embed.timestamp = datetime.now()
+            
+            await send_log_message(bot, FAILURE_CHANNEL_ID, embed)
+            return
         
         # 1단계: 디스코드 ID → 마크 ID
-        rate_limiter.record_request()
-        url1 = f"https://api.planetearth.kr/discord?discord={discord_id}"
-        print(f"🔗 1단계 API 호출: {url1}")
+        url1 = f"{MC_API_BASE}/discord?discord={user_id}"
         
         async with session.get(url1, timeout=aiohttp.ClientTimeout(total=10)) as r1:
-            print(f"📥 1단계 응답: Status={r1.status}")
             if r1.status != 200:
-                return {"success": False, "error": f"마크ID 조회 실패 ({r1.status})"}
+                error_message = f"마인크래프트 계정 연동 정보를 찾을 수 없습니다 (HTTP {r1.status})"
+                print(f"  ❌ 1단계 실패: {r1.status}")
+                raise Exception(error_message)
             
             data1 = await r1.json()
-            print(f"📋 1단계 데이터: {data1}")
-            
             if not data1.get('data') or not data1['data']:
-                return {"success": False, "error": "마크ID 데이터 없음"}
+                error_message = "마인크래프트 계정이 연동되지 않았습니다"
+                print(f"  ❌ 마크 ID 데이터 없음")
+                raise Exception(error_message)
             
             mc_id = data1['data'][0].get('name')
             if not mc_id:
-                return {"success": False, "error": "마크ID 없음"}
+                error_message = "마인크래프트 닉네임을 찾을 수 없습니다"
+                print(f"  ❌ 마크 ID 없음")
+                raise Exception(error_message)
             
-            print(f"✅ 마크 ID 획득: {mc_id}")
+            print(f"  ✅ 마크 ID: {mc_id}")
         
-        await asyncio.sleep(5)  # API 간 대기시간
+        time.sleep(5)
         
         # 2단계: 마크 ID → 마을
-        if not rate_limiter.can_make_request():
-            wait_time = rate_limiter.get_wait_time()
-            await asyncio.sleep(wait_time)
-        
-        rate_limiter.record_request()
-        url2 = f"https://api.planetearth.kr/resident?name={mc_id}"
-        print(f"🔗 2단계 API 호출: {url2}")
+        url2 = f"{MC_API_BASE}/resident?name={mc_id}"
         
         async with session.get(url2, timeout=aiohttp.ClientTimeout(total=10)) as r2:
-            print(f"📥 2단계 응답: Status={r2.status}")
             if r2.status != 200:
-                return {"success": False, "error": f"마을 조회 실패 ({r2.status})", "mc_id": mc_id}
+                error_message = f"마을 정보를 조회할 수 없습니다 (HTTP {r2.status})"
+                print(f"  ❌ 2단계 실패: {r2.status}")
+                raise Exception(error_message)
             
             data2 = await r2.json()
-            print(f"📋 2단계 데이터: {data2}")
-            
             if not data2.get('data') or not data2['data']:
-                return {"success": False, "error": "마을 데이터 없음", "mc_id": mc_id}
+                error_message = "마을에 소속되어 있지 않습니다"
+                print(f"  ❌ 마을 데이터 없음")
+                raise Exception(error_message)
             
             town = data2['data'][0].get('town')
             if not town:
-                return {"success": False, "error": "마을 없음", "mc_id": mc_id}
+                error_message = "마을 정보가 없습니다"
+                print(f"  ❌ 마을 없음")
+                raise Exception(error_message)
             
-            print(f"✅ 마을 획득: {town}")
+            print(f"  ✅ 마을: {town}")
         
-        await asyncio.sleep(5)  # API 간 대기시간
+        time.sleep(5)
         
         # 3단계: 마을 → 국가
-        if not rate_limiter.can_make_request():
-            wait_time = rate_limiter.get_wait_time()
-            await asyncio.sleep(wait_time)
-        
-        rate_limiter.record_request()
-        url3 = f"https://api.planetearth.kr/town?name={town}"
-        print(f"🔗 3단계 API 호출: {url3}")
+        url3 = f"{MC_API_BASE}/town?name={town}"
         
         async with session.get(url3, timeout=aiohttp.ClientTimeout(total=10)) as r3:
-            print(f"📥 3단계 응답: Status={r3.status}")
             if r3.status != 200:
-                return {"success": False, "error": f"국가 조회 실패 ({r3.status})", "mc_id": mc_id, "town": town}
+                error_message = f"국가 정보를 조회할 수 없습니다 (HTTP {r3.status})"
+                print(f"  ❌ 3단계 실패: {r3.status}")
+                raise Exception(error_message)
             
             data3 = await r3.json()
-            print(f"📋 3단계 데이터: {data3}")
-            
             if not data3.get('data') or not data3['data']:
-                return {"success": False, "error": "국가 데이터 없음", "mc_id": mc_id, "town": town}
+                error_message = "국가에 소속되어 있지 않습니다"
+                print(f"  ❌ 국가 데이터 없음")
+                raise Exception(error_message)
             
             nation = data3['data'][0].get('nation')
             if not nation:
-                return {"success": False, "error": "국가 없음", "mc_id": mc_id, "town": town}
+                error_message = "국가 정보가 없습니다"
+                print(f"  ❌ 국가 없음")
+                raise Exception(error_message)
             
-            print(f"✅ 국가 획득: {nation}")
+            print(f"  ✅ 국가: {nation}")
         
-        await asyncio.sleep(5)  # API 간 대기시간
+        # 역할 부여 및 닉네임 변경
+        role_changes = await update_user_info(member, mc_id, nation, guild)
         
-        return {
-            "success": True, 
-            "mc_id": mc_id, 
-            "town": town, 
-            "nation": nation
-        }
+        print(f"✅ 사용자 처리 완료: {member.display_name} ({nation})")
         
-    except asyncio.TimeoutError:
-        print(f"⏰ API 타임아웃 발생 (Discord ID: {discord_id})")
-        return {"success": False, "error": "API 호출 타임아웃"}
-    except Exception as e:
-        print(f"💥 예외 발생 (Discord ID: {discord_id}): {str(e)}")
-        return {"success": False, "error": f"API 호출 중 오류: {str(e)}"}
-
-# /국민확인 명령어를 위한 단일 사용자 처리 함수 (콘솔 로그 포함)
-async def process_single_user_with_logs(member, session, rate_limiter):
-    """단일 사용자 처리 (콘솔 로그 포함)"""
-    try:
-        print(f"🔍 /국민확인 명령어 실행: {member.display_name} ({member.id})")
-        
-        BASE_NATION = os.getenv("BASE_NATION", "Red_Mafia")
-        
-        # 3단계 API 호출로 사용자 정보 조회
-        user_info = await get_user_info_by_name(session, member.id, rate_limiter)
-        
-        if not user_info["success"]:
-            error_msg = user_info["error"]
-            mc_id = user_info.get("mc_id", "알 수 없음")
-            town = user_info.get("town", "")
-            
-            print(f"❌ /국민확인 API 조회 실패: {member.display_name} - {error_msg}")
-            
-            # 에러 메시지 구성
-            if mc_id != "알 수 없음":
-                if town:
-                    error_detail = f"IGN: `{mc_id}`, 마을: `{town}` - {error_msg}"
-                else:
-                    error_detail = f"IGN: `{mc_id}` - {error_msg}"
-            else:
-                error_detail = error_msg
-            
-            return {"success": False, "message": f"⚠️ {member.mention} 인증 실패 - {error_detail}"}
-
-        mc_id = user_info["mc_id"]
-        town = user_info["town"]
-        nation = user_info["nation"]
-        
-        print(f"📋 /국민확인 결과: {member.display_name} -> IGN: {mc_id}, 마을: {town}, 국가: {nation}")
-
-        # 국가 검증 및 닉네임 처리
-        if nation != BASE_NATION:
-            # 다른 국가인 경우에도 닉네임은 업데이트
-            await update_nickname_with_nation(member, mc_id, nation)
-            print(f"⚠️ /국민확인: {member.display_name}는 다른 국가 ({nation}) 국민입니다.")
-            
-            return {"success": False, "message": f"⚠️ {member.mention} 인증 실패 - 국가 불일치 (IGN: `{mc_id}`, 마을: `{town}`, 국가: `{nation}`)"}
-
-        # Red_Mafia 국민인 경우 기존 로직으로 역할 할당 및 닉네임 설정
-        await update_nickname_with_nation(member, mc_id, nation)
-        print(f"✅ /국민확인 성공: {member.display_name} -> {mc_id} ({town}, {nation})")
-        
-        return {"success": True, "message": f"✅ {member.mention} 인증 성공! IGN: `{mc_id}`, 마을: `{town}`, 국가: `{nation}`"}
-
-    except Exception as e:
-        print(f"❌ /국민확인 처리 중 오류 ({member.display_name}): {e}")
-        return {"success": False, "message": f"❌ 처리 중 오류가 발생했습니다: {str(e)}"}
-
-def setup_scheduler(bot):
-    try:
-        GUILD_ID = get_env_int("GUILD_ID")
-        SUCCESS_CHANNEL_ID = get_env_int("SUCCESS_CHANNEL_ID")
-        FAILURE_CHANNEL_ID = get_env_int("FAILURE_CHANNEL_ID")
-        
-        print(f"🔧 스케줄러 설정:")
-        print(f"   - GUILD_ID: {GUILD_ID}")
-        print(f"   - SUCCESS_CHANNEL_ID: {SUCCESS_CHANNEL_ID}")
-        print(f"   - FAILURE_CHANNEL_ID: {FAILURE_CHANNEL_ID}")
-        
-    except ValueError as e:
-        print(f"❌ 환경변수 오류: {e}")
-        return
-
-    scheduler = AsyncIOScheduler()
-    rate_limiter = RateLimiter()
-
-    async def process_single_user(member, guild, success_channel, failure_channel, session):
-        try:
-            print(f"🔄 처리 중: {member.display_name} ({member.id})")
-
-            # 예외 사용자 확인 - 중요한 부분!
-            if is_exception_user(member.id):
-                print(f"🚫 예외 사용자로 설정됨 - 처리 건너뜀: {member.display_name} ({member.id})")
-                return True  # 예외 사용자는 성공으로 처리하여 더 이상 처리하지 않음
-
-            BASE_NATION = os.getenv("BASE_NATION", "Red_Mafia")
-            remove_role_on_fail = os.getenv("REMOVE_ROLE_IF_WRONG_NATION", "true").lower() == "true"
-
-            # 3단계 API 호출로 사용자 정보 조회
-            user_info = await get_user_info_by_name(session, member.id, rate_limiter)
-            
-            if not user_info["success"]:
-                error_msg = user_info["error"]
-                mc_id = user_info.get("mc_id", "알 수 없음")
-                town = user_info.get("town", "")
-                
-                print(f"❌ API 조회 실패: {member.display_name} - {error_msg}")
-                
-                # 에러 메시지 구성
-                if mc_id != "알 수 없음":
-                    if town:
-                        error_detail = f"IGN: `{mc_id}`, 마을: `{town}` - {error_msg}"
-                    else:
-                        error_detail = f"IGN: `{mc_id}` - {error_msg}"
-                else:
-                    error_detail = error_msg
-                
-                await failure_channel.send(f"⚠️ {member.mention} 인증 실패 - {error_detail}")
-                return False
-
-            mc_id = user_info["mc_id"]
-            town = user_info["town"]
-            nation = user_info["nation"]
-
-            # 국가 검증 및 닉네임 처리
-            if nation != BASE_NATION:
-                if remove_role_on_fail:
-                    await remove_roles_and_reset_nick(member)
-                    print(f"🧹 역할 제거됨: {member.display_name}")
-                else:
-                    print(f"⚠️ 역할 유지됨: {member.display_name}")
-                
-                # 다른 국가인 경우에도 닉네임은 업데이트
-                await update_nickname_with_nation(member, mc_id, nation)
-                
-                await failure_channel.send(f"⚠️ {member.mention} 인증 실패 - 국가 불일치 (IGN: `{mc_id}`, 마을: `{town}`, 국가: `{nation}`)")
-                return False
-
-            # Red_Mafia 국민인 경우 기존 로직으로 역할 할당 및 닉네임 설정
-            await update_nickname_with_nation(member, mc_id, nation)
-            await success_channel.send(f"✅ {member.mention} 인증 성공! IGN: `{mc_id}`, 마을: `{town}`, 국가: `{nation}`")
-            print(f"✅ 인증 성공: {member.display_name} -> {mc_id} ({town}, {nation})")
-            return True
-
-        except Exception as e:
-            print(f"❌ 처리 중 오류 ({member.display_name}): {e}")
-            return False
-
-    async def process_queue():
-        guild = bot.get_guild(GUILD_ID)
-        success_channel = bot.get_channel(SUCCESS_CHANNEL_ID)
-        failure_channel = bot.get_channel(FAILURE_CHANNEL_ID)
-
-        if not guild:
-            print(f"❌ 길드를 찾을 수 없습니다 (ID: {GUILD_ID})")
-            return
-        if not success_channel:
-            print(f"❌ 성공 채널을 찾을 수 없습니다 (ID: {SUCCESS_CHANNEL_ID})")
-            return
-        if not failure_channel:
-            print(f"❌ 실패 채널을 찾을 수 없습니다 (ID: {FAILURE_CHANNEL_ID})")
-            return
-
-        failed_users = []
-        processed_count = 0
-        success_count = 0
-        exception_count = 0  # 예외 사용자 카운트 추가
-        batch_size = 3  # API 대기시간 때문에 배치 크기 줄임
-        current_batch = 0
-
-        # aiohttp 세션 생성
-        async with aiohttp.ClientSession() as session:
-            while user_id := queue_manager.get_next():
-                processed_count += 1
-                current_batch += 1
-
-                member = guild.get_member(user_id)
-                if not member:
-                    print(f"⚠️ 멤버를 찾을 수 없습니다 (ID: {user_id})")
-                    failed_users.append(f"<@{user_id}>")
-                    continue
-
-                # 예외 사용자 체크를 여기서도 한 번 더 확인
-                if is_exception_user(member.id):
-                    exception_count += 1
-                    print(f"🚫 예외 사용자 건너뜀: {member.display_name} ({member.id})")
-                    continue
-
-                success = await process_single_user(member, guild, success_channel, failure_channel, session)
-
-                if success:
-                    success_count += 1
-                else:
-                    failed_users.append(member.mention)
-
-                # 배치마다 더 긴 대기시간 (API 호출이 많아짐)
-                if current_batch >= batch_size:
-                    print(f"📦 배치 완료: {current_batch}명 처리, 다음 배치까지 10초 대기")
-                    current_batch = 0
-                    await asyncio.sleep(10)
-
-        # 실패 유저 리스트 전송
-        if failed_users:
-            chunk_size = 10
-            for i in range(0, len(failed_users), chunk_size):
-                chunk = failed_users[i:i + chunk_size]
-                await failure_channel.send(f"❌ 인증 실패 유저 ({i+1}-{min(i+chunk_size, len(failed_users))}/{len(failed_users)}): {', '.join(chunk)}")
-
-        if processed_count > 0:
-            print(f"📊 대기열 처리 완료: 총 {processed_count}명 (성공: {success_count}, 실패: {len(failed_users)}, 예외제외: {exception_count})")
-
-    # 1분마다 대기열 처리 (API 대기시간 고려해서 간격 늘릴 수 있음)
-    scheduler.add_job(process_queue, "interval", seconds=60)
-
-    # 자동 실행 스케줄 설정 - FIX: 동기 함수로 변경
-    try:
-        auto_day = get_env_int("AUTO_EXECUTION_DAY", 6)
-        auto_hour = get_env_int("AUTO_EXECUTION_HOUR", 2)
-        auto_minute = get_env_int("AUTO_EXECUTION_MINUTE", 0)
-
-        def schedule_auto_roles():
-            """스케줄러에서 호출할 동기 함수"""
-            try:
-                # 현재 실행 중인 이벤트 루프 가져오기
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # 이미 실행 중인 루프에서 코루틴 스케줄링
-                    asyncio.ensure_future(add_auto_roles(bot))
-                else:
-                    # 루프가 실행 중이 아니면 새로 실행
-                    loop.run_until_complete(add_auto_roles(bot))
-            except RuntimeError:
-                # 이벤트 루프가 없는 경우 새 루프 생성
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(add_auto_roles(bot))
-                finally:
-                    loop.close()
-            except Exception as e:
-                print(f"❌ 자동 역할 스케줄 실행 오류: {e}")
-
-        scheduler.add_job(
-            schedule_auto_roles,
-            "cron",
-            day_of_week=auto_day,
-            hour=auto_hour,
-            minute=auto_minute
-        )
-        day_names = ["월", "화", "수", "목", "금", "토", "일"]
-        day_str = day_names[auto_day]
-
-        print(f"🕒 자동 실행 스케줄: 매주 {day_str}요일 {auto_hour}:{auto_minute:02d}")
-
-    except ValueError as e:
-        print(f"⚠️ 자동 실행 스케줄 설정 실패: {e}")
-
-    scheduler.start()
-    print("🚀 스케줄러 시작됨")
-
-async def add_auto_roles(bot):
-    try:
-        GUILD_ID = get_env_int("GUILD_ID")
-        guild = bot.get_guild(GUILD_ID)
-
-        if not guild:
-            print(f"❌ 자동 역할 처리: 길드를 찾을 수 없습니다 (ID: {GUILD_ID})")
-            return
-
-        auto_roles_file = "auto_roles.txt"
-        if not os.path.exists(auto_roles_file):
-            print(f"⚠️ 자동 역할 파일이 없습니다: {auto_roles_file}")
-            return
-
-        added_count = 0
-        processed_roles = 0
-        exception_count = 0
-
-        # 예외 사용자 목록 미리 로드
-        exception_users_set = load_exception_users()
-        print(f"🚫 예외 사용자 목록 로드: {len(exception_users_set)}명")
-
-        with open(auto_roles_file, "r", encoding="utf-8") as f:
-            for line_num, line in enumerate(f.readlines(), 1):
-                role_id = line.strip()
-                if not role_id or role_id.startswith("#"):
-                    continue
-
-                try:
-                    role = guild.get_role(int(role_id))
-                    if role:
-                        role_added_count = 0
-                        role_exception_count = 0
-                        
-                        for member in role.members:
-                            # 예외 사용자인지 확인 (문자열로 비교)
-                            if str(member.id) in exception_users_set:
-                                role_exception_count += 1
-                                exception_count += 1
-                                print(f"🚫 예외 사용자 제외: {member.display_name} ({member.id})")
-                                continue
-                                
-                            if not queue_manager.is_user_in_queue(member.id):
-                                queue_manager.add_user(member.id)
-                                role_added_count += 1
-                                added_count += 1
-                        
-                        processed_roles += 1
-                        print(f"🔄 자동 역할 처리: {role.name} - 총 {len(role.members)}명 중 {role_added_count}명 추가, {role_exception_count}명 예외 제외")
-                    else:
-                        print(f"⚠️ 역할 없음 (ID: {role_id}, 라인: {line_num})")
-                except Exception as e:
-                    print(f"❌ 역할 처리 오류 (ID: {role_id}, 라인: {line_num}): {e}")
-
-        # 예외 대상 목록 출력
-        if exception_users_set:
-            exception_mentions = []
-            for user_id in exception_users_set:
-                member = guild.get_member(int(user_id))
-                if member:
-                    exception_mentions.append(member.display_name)
-                else:
-                    exception_mentions.append(f"<@{user_id}>")
-            
-            print(f"🚫 예외대상: {', '.join(exception_mentions)} (총 {len(exception_users_set)}명)")
-        
-        print(f"📋 자동 역할 처리 완료: {processed_roles}개 역할, 총 {added_count}명 추가, {exception_count}명 예외 제외")
-
-    except Exception as e:
-        print(f"❌ 자동 역할 처리 중 오류: {e}")
-
-async def get_queue_status():
-    return {
-        "queue_size": queue_manager.get_queue_size(),
-        "processing": queue_manager.is_processing()
-    }
-
-async def clear_queue():
-    cleared_count = queue_manager.clear_queue()
-    print(f"🧹 대기열 초기화 완료: {cleared_count}명 제거됨")
-    return cleared_count
-
-# 새로운 함수들 추가
-
-async def handle_exception_command(interaction, action, target_user=None):
-    """예외설정 명령어 처리"""
-    try:
-        print(f"🔧 예외설정 명령어 처리: {action}, 대상: {target_user.display_name if target_user else '없음'}")
-        
-        if action == "목록":
-            exception_users = get_exception_users_list()
-            if not exception_users:
-                await interaction.response.send_message("📋 예외 설정된 사용자가 없습니다.", ephemeral=True)
-                return
-            
-            guild = interaction.guild
-            user_mentions = []
-            for user_id in exception_users:
-                member = guild.get_member(int(user_id))
-                if member:
-                    user_mentions.append(f"{member.display_name} ({member.mention})")
-                else:
-                    user_mentions.append(f"<@{user_id}> (서버에 없음)")
-            
+        # 성공 로그 전송
+        if nation == BASE_NATION:
             embed = discord.Embed(
-                title="🚫 예외 설정 사용자 목록",
-                description="\n".join(user_mentions),
-                color=0xff6b6b
+                title="✅ 국민 확인 완료",
+                description=f"**{BASE_NATION}** 국민으로 확인되었습니다!",
+                color=0x00ff00
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            
-        elif action == "추가":
-            if not target_user:
-                await interaction.response.send_message("❌ 추가할 사용자를 지정해주세요.", ephemeral=True)
-                return
-            
-            print(f"➕ 예외 사용자 추가 시도: {target_user.display_name} ({target_user.id})")
-            
-            if add_exception_user(target_user.id):
-                await interaction.response.send_message(
-                    f"✅ {target_user.mention}을(를) 예외 목록에 추가했습니다.\n"
-                    f"이제 이 사용자는 자동 역할 부여 및 대기열 처리에서 제외됩니다.", 
-                    ephemeral=True
-                )
-                print(f"🚫 예외 사용자 추가 완료: {target_user.display_name} ({target_user.id})")
-            else:
-                await interaction.response.send_message("❌ 예외 목록 저장에 실패했습니다.", ephemeral=True)
-                
-        elif action == "제거":
-            if not target_user:
-                await interaction.response.send_message("❌ 제거할 사용자를 지정해주세요.", ephemeral=True)
-                return
-            
-            print(f"➖ 예외 사용자 제거 시도: {target_user.display_name} ({target_user.id})")
-            
-            if remove_exception_user(target_user.id):
-                await interaction.response.send_message(
-                    f"✅ {target_user.mention}을(를) 예외 목록에서 제거했습니다.\n"
-                    f"이제 이 사용자는 자동 역할 부여 및 대기열 처리에 포함됩니다.", 
-                    ephemeral=True
-                )
-                print(f"✅ 예외 사용자 제거 완료: {target_user.display_name} ({target_user.id})")
-            else:
-                await interaction.response.send_message("❌ 예외 목록 저장에 실패했습니다.", ephemeral=True)
+        else:
+            embed = discord.Embed(
+                title="⚠️ 다른 국가 소속",
+                description=f"**{nation}** 국가에 소속되어 있습니다.",
+                color=0xff9900
+            )
+        
+        embed.add_field(
+            name="👤 사용자 정보",
+            value=f"**Discord:** {member.mention}\n**닉네임:** {member.display_name}",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🎮 마인크래프트 정보",
+            value=f"**닉네임:** {mc_id}\n**마을:** {town}\n**국가:** {nation}",
+            inline=False
+        )
+        
+        if role_changes:
+            embed.add_field(
+                name="🔄 변경 사항",
+                value="\n".join(role_changes),
+                inline=False
+            )
+        
+        embed.timestamp = datetime.now()
+        
+        await send_log_message(bot, SUCCESS_CHANNEL_ID, embed)
         
     except Exception as e:
-        print(f"❌ 예외설정 명령어 처리 오류: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ 사용자 {user_id} 처리 중 오류: {e}")
+        
+        # 실패 로그 전송
+        embed = discord.Embed(
+            title="❌ 사용자 처리 실패",
+            color=0xff0000
+        )
+        
+        if member:
+            embed.add_field(
+                name="👤 사용자 정보",
+                value=f"**Discord:** {member.mention}\n**닉네임:** {member.display_name}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="👤 사용자 정보",
+                value=f"**사용자 ID:** {user_id}",
+                inline=False
+            )
+        
+        if mc_id:
+            minecraft_info = f"**마인크래프트 닉네임:** ``{mc_id}``"
+            if town:
+                minecraft_info += f"\n**마을:** {town}"
+            if nation:
+                minecraft_info += f"\n**국가:** {nation}"
+            
+            embed.add_field(
+                name="🎮 마인크래프트 정보",
+                value=minecraft_info,
+                inline=False
+            )
+        
+        embed.add_field(
+            name="❌ 오류 내용",
+            value=str(e)[:1000],  # 너무 긴 오류 메시지 제한
+            inline=False
+        )
+        
+        embed.timestamp = datetime.now()
+        
+        await send_log_message(bot, FAILURE_CHANNEL_ID, embed)
+
+async def update_user_info(member, mc_id, nation, guild):
+    """사용자 정보 업데이트 (역할, 닉네임) 및 변경사항 반환"""
+    changes = []
+    
+    try:
+        # 새 닉네임 생성 (기존 닉네임을 고려하여)
+        current_nickname = member.display_name
+        new_nickname = create_nickname(mc_id, nation, current_nickname)
         
         try:
-            await interaction.response.send_message("❌ 명령어 처리 중 오류가 발생했습니다.", ephemeral=True)
-        except:
-            # 이미 응답했을 수도 있으니 followup 시도
-            try:
-                await interaction.followup.send("❌ 명령어 처리 중 오류가 발생했습니다.", ephemeral=True)
-            except:
-                pass
-
-async def handle_citizen_check_command(interaction, target_user):
-    """국민확인 명령어 처리"""
-    try:
-        print(f"🔍 국민확인 명령어 처리: {target_user.display_name} ({target_user.id})")
-        
-        await interaction.response.defer()
-        
-        rate_limiter = RateLimiter()
-        
-        async with aiohttp.ClientSession() as session:
-            result = await process_single_user_with_logs(target_user, session, rate_limiter)
-            
-            if result["success"]:
-                embed = discord.Embed(
-                    title="✅ 국민확인 성공",
-                    description=result["message"],
-                    color=0x00ff00
-                )
+            if current_nickname != new_nickname:
+                await member.edit(nick=new_nickname)
+                changes.append(f"• 닉네임이 **``{new_nickname}``**로 변경됨")
+                print(f"  ✅ 닉네임 변경: {current_nickname} → {new_nickname}")
             else:
-                embed = discord.Embed(
-                    title="❌ 국민확인 실패",
-                    description=result["message"],
-                    color=0xff0000
-                )
-            
-            await interaction.followup.send(embed=embed)
-            
-    except Exception as e:
-        print(f"❌ 국민확인 명령어 처리 오류: {e}")
-        import traceback
-        traceback.print_exc()
+                print(f"  ℹ️ 닉네임 유지: {new_nickname}")
+        except discord.Forbidden:
+            changes.append("• ⚠️ 닉네임 변경 권한 없음")
+            print(f"  ⚠️ 닉네임 변경 권한 없음")
+        except Exception as e:
+            changes.append(f"• ⚠️ 닉네임 변경 실패: {str(e)[:50]}")
+            print(f"  ⚠️ 닉네임 변경 실패: {e}")
         
-        try:
-            await interaction.followup.send("❌ 명령어 처리 중 오류가 발생했습니다.")
-        except:
-            pass
+        # 역할 부여
+        if nation == BASE_NATION:
+            # 국민인 경우
+            if SUCCESS_ROLE_ID != 0:
+                success_role = guild.get_role(SUCCESS_ROLE_ID)
+                if success_role and success_role not in member.roles:
+                    try:
+                        await member.add_roles(success_role)
+                        changes.append(f"• **{success_role.name}** 역할 추가됨")
+                        print(f"  ✅ 국민 역할 부여: {success_role.name}")
+                    except Exception as e:
+                        changes.append(f"• ⚠️ 국민 역할 부여 실패: {str(e)[:50]}")
+                        print(f"  ⚠️ 국민 역할 부여 실패: {e}")
+            
+            # 비국민 역할 제거
+            if SUCCESS_ROLE_ID_OUT != 0:
+                out_role = guild.get_role(SUCCESS_ROLE_ID_OUT)
+                if out_role and out_role in member.roles:
+                    try:
+                        await member.remove_roles(out_role)
+                        changes.append(f"• **{out_role.name}** 역할 제거됨")
+                        print(f"  ✅ 비국민 역할 제거: {out_role.name}")
+                    except Exception as e:
+                        changes.append(f"• ⚠️ 비국민 역할 제거 실패: {str(e)[:50]}")
+                        print(f"  ⚠️ 비국민 역할 제거 실패: {e}")
+        else:
+            # 비국민인 경우
+            if SUCCESS_ROLE_ID_OUT != 0:
+                out_role = guild.get_role(SUCCESS_ROLE_ID_OUT)
+                if out_role and out_role not in member.roles:
+                    try:
+                        await member.add_roles(out_role)
+                        changes.append(f"• **{out_role.name}** 역할 추가됨")
+                        print(f"  ✅ 비국민 역할 부여: {out_role.name}")
+                    except Exception as e:
+                        changes.append(f"• ⚠️ 비국민 역할 부여 실패: {str(e)[:50]}")
+                        print(f"  ⚠️ 비국민 역할 부여 실패: {e}")
+            
+            # 국민 역할 제거
+            if SUCCESS_ROLE_ID != 0:
+                success_role = guild.get_role(SUCCESS_ROLE_ID)
+                if success_role and success_role in member.roles:
+                    try:
+                        await member.remove_roles(success_role)
+                        changes.append(f"• **{success_role.name}** 역할 제거됨")
+                        print(f"  ✅ 국민 역할 제거: {success_role.name}")
+                    except Exception as e:
+                        changes.append(f"• ⚠️ 국민 역할 제거 실패: {str(e)[:50]}")
+                        print(f"  ⚠️ 국민 역할 제거 실패: {e}")
+        
+        return changes
+        
+    except Exception as e:
+        print(f"❌ 사용자 정보 업데이트 실패: {e}")
+        return [f"• ❌ 업데이트 실패: {str(e)[:50]}"]
 
-# 대기열에 사용자 추가할 때 예외 사용자 체크하는 헬퍼 함수
-def add_users_to_queue_with_exception_check(user_ids, guild=None):
-    """예외 사용자를 제외하고 대기열에 사용자들을 추가"""
+async def execute_auto_roles(bot):
+    """자동 역할 실행 함수"""
     try:
-        exception_users_set = load_exception_users()
+        print("🎯 자동 역할 실행 시작")
+        
+        # auto_roles.txt 파일 확인
+        auto_roles_path = "auto_roles.txt"
+        if not os.path.exists(auto_roles_path):
+            print("⚠️ auto_roles.txt 파일이 존재하지 않습니다.")
+            
+            # 실패 로그 전송
+            embed = discord.Embed(
+                title="❌ 자동 역할 실행 실패",
+                description="auto_roles.txt 파일이 존재하지 않습니다.",
+                color=0xff0000
+            )
+            embed.timestamp = datetime.now()
+            await send_log_message(bot, FAILURE_CHANNEL_ID, embed)
+            return
+        
+        # 역할 ID 읽기
+        with open(auto_roles_path, "r") as f:
+            role_ids = [line.strip() for line in f.readlines() if line.strip()]
+        
+        if not role_ids:
+            print("⚠️ auto_roles.txt 파일에 역할 ID가 없습니다.")
+            
+            # 실패 로그 전송
+            embed = discord.Embed(
+                title="❌ 자동 역할 실행 실패",
+                description="auto_roles.txt 파일에 역할 ID가 없습니다.",
+                color=0xff0000
+            )
+            embed.timestamp = datetime.now()
+            await send_log_message(bot, FAILURE_CHANNEL_ID, embed)
+            return
+        
         added_count = 0
-        exception_count = 0
         
-        for user_id in user_ids:
-            if str(user_id) in exception_users_set:
-                exception_count += 1
-                if guild:
-                    member = guild.get_member(user_id)
-                    member_name = member.display_name if member else f"ID:{user_id}"
-                    print(f"🚫 예외 사용자 제외: {member_name} ({user_id})")
-                continue
-                
-            if not queue_manager.is_user_in_queue(user_id):
-                queue_manager.add_user(user_id)
-                added_count += 1
+        # 각 길드에서 역할 멤버들을 대기열에 추가
+        for guild in bot.guilds:
+            print(f"🏰 길드 처리: {guild.name}")
+            
+            for role_id_str in role_ids:
+                try:
+                    role_id = int(role_id_str)
+                    role = guild.get_role(role_id)
+                    
+                    if not role:
+                        print(f"⚠️ 역할을 찾을 수 없음: {role_id}")
+                        continue
+                    
+                    print(f"👥 역할 '{role.name}' 멤버 {len(role.members)}명 처리 중")
+                    
+                    for member in role.members:
+                        # 예외 목록 확인
+                        if exception_manager.is_exception(member.id):
+                            print(f"  ⏭️ 예외 대상 건너뜀: {member.display_name}")
+                            continue
+                        
+                        # 대기열에 추가
+                        if queue_manager.add_user(member.id):
+                            added_count += 1
+                            print(f"  ➕ 대기열 추가: {member.display_name}")
+                        else:
+                            print(f"  ⏭️ 이미 대기열에 있음: {member.display_name}")
+                    
+                except ValueError:
+                    print(f"⚠️ 잘못된 역할 ID 형식: {role_id_str}")
+                    continue
+                except Exception as e:
+                    print(f"⚠️ 역할 처리 오류 ({role_id_str}): {e}")
+                    continue
         
-        print(f"📋 대기열 추가 완료: {added_count}명 추가, {exception_count}명 예외 제외")
-        return {"added": added_count, "excluded": exception_count}
+        print(f"✅ 자동 역할 실행 완료 - {added_count}명 대기열 추가")
+        
+        # 자동 역할 실행 완료 로그 전송
+        embed = discord.Embed(
+            title="🎯 자동 역할 실행 완료",
+            description=f"**{added_count}명**이 대기열에 추가되었습니다.",
+            color=0x00ff00
+        )
+        
+        embed.add_field(
+            name="📋 처리된 역할",
+            value=", ".join([f"<@&{role_id.strip()}>" for role_id in role_ids]) if role_ids else "없음",
+            inline=False
+        )
+        
+        current_queue_size = queue_manager.get_queue_size()
+        embed.add_field(
+            name="📊 대기열 현황",
+            value=f"현재 대기 중: **{current_queue_size}명**",
+            inline=False
+        )
+        
+        if current_queue_size > 0:
+            estimated_minutes = (current_queue_size * 36) // 60  # 배치당 36초 예상
+            embed.add_field(
+                name="⏰ 예상 완료 시간",
+                value=f"약 {estimated_minutes}분 후" if estimated_minutes > 0 else "1분 이내",
+                inline=False
+            )
+        
+        embed.timestamp = datetime.now()
+        
+        await send_log_message(bot, SUCCESS_CHANNEL_ID, embed)
         
     except Exception as e:
-        print(f"❌ 대기열 추가 중 오류: {e}")
-        return {"added": 0, "excluded": 0}
-
-# 역할 기반 대기열 추가 함수 (예외 사용자 체크 포함)
-async def add_role_members_to_queue(guild, role_id):
-    """특정 역할의 멤버들을 예외 사용자를 제외하고 대기열에 추가"""
-    try:
-        role = guild.get_role(role_id)
-        if not role:
-            print(f"❌ 역할을 찾을 수 없습니다 (ID: {role_id})")
-            return {"added": 0, "excluded": 0, "error": "역할을 찾을 수 없음"}
+        print(f"❌ 자동 역할 실행 오류: {e}")
         
-        user_ids = [member.id for member in role.members]
-        result = add_users_to_queue_with_exception_check(user_ids, guild)
+        # 자동 역할 실행 실패 로그 전송
+        embed = discord.Embed(
+            title="❌ 자동 역할 실행 실패",
+            description="자동 역할 실행 중 오류가 발생했습니다.",
+            color=0xff0000
+        )
         
-        print(f"🔄 역할 '{role.name}' 처리: 총 {len(user_ids)}명 중 {result['added']}명 추가, {result['excluded']}명 예외 제외")
-        return result
+        embed.add_field(
+            name="❌ 오류 내용",
+            value=str(e)[:1000],
+            inline=False
+        )
         
-    except Exception as e:
-        print(f"❌ 역할 멤버 대기열 추가 중 오류: {e}")
-        return {"added": 0, "excluded": 0, "error": str(e)}
-
-# 기존 export 함수들은 그대로 유지
-async def get_user_info_by_name_export(session, discord_id, rate_limiter):
-    return await get_user_info_by_name(session, discord_id, rate_limiter)
-
-async def process_single_user_with_logs_export(member, session, rate_limiter):
-    return await process_single_user_with_logs(member, session, rate_limiter)
+        embed.timestamp = datetime.now()
+        
+        await send_log_message(bot, FAILURE_CHANNEL_ID, embed)
