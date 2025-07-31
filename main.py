@@ -18,6 +18,14 @@ except ImportError:
     print("⚠️ exception_manager.py 파일을 찾을 수 없습니다. 예외 관리 기능이 비활성화됩니다.")
     exception_manager = None
 
+# scheduler 모듈 로드 (자동 처리에 필요)
+try:
+    from scheduler import is_exception_user
+    print("✅ scheduler 모듈에서 예외 사용자 확인 함수 로드됨")
+except ImportError:
+    print("⚠️ scheduler.py에서 is_exception_user 함수를 로드할 수 없습니다.")
+    is_exception_user = None
+
 # Intents 설정
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="/", intents=intents)
@@ -30,10 +38,14 @@ async def on_ready():
     print(f"✅ Success Channel: {config.SUCCESS_CHANNEL_ID}")
     print(f"✅ Failure Channel: {config.FAILURE_CHANNEL_ID}")
     
+    # 멤버 자동 추가 설정 확인
+    auto_add_status = getattr(config, 'AUTO_ADD_NEW_MEMBERS', True)
+    print(f"✅ 새 멤버 자동 추가: {'활성화' if auto_add_status else '비활성화'}")
+    
     # 예외 관리자 초기화
     if exception_manager:
         try:
-            exception_count = len(exception_manager.get_exception_users_list())
+            exception_count = len(exception_manager.get_exceptions())
             print(f"✅ 예외 관리자 초기화 완료 (예외 사용자: {exception_count}명)")
         except Exception as e:
             print(f"⚠️ 예외 관리자 초기화 오류: {e}")
@@ -70,56 +82,130 @@ async def on_ready():
     # 스케줄러 설정
     try:
         from scheduler import setup_scheduler
+        print("🔧 스케줄러 설정:")
+        print(f"   - GUILD_ID: {config.GUILD_ID}")
+        print(f"   - SUCCESS_CHANNEL_ID: {config.SUCCESS_CHANNEL_ID}")
+        print(f"   - FAILURE_CHANNEL_ID: {config.FAILURE_CHANNEL_ID}")
+        
+        # 스케줄 시간 정보 추가
+        auto_execution_day = getattr(config, 'AUTO_EXECUTION_DAY', 2)  # 기본값: 수요일(2)
+        auto_execution_hour = getattr(config, 'AUTO_EXECUTION_HOUR', 3)  # 기본값: 03시
+        auto_execution_minute = getattr(config, 'AUTO_EXECUTION_MINUTE', 24)  # 기본값: 24분
+        
+        # 요일 한글 변환
+        day_names = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+        korean_day = day_names[auto_execution_day] if 0 <= auto_execution_day <= 6 else "알 수 없음"
+        
+        print(f"🕒 자동 실행 스케줄: 매주 {korean_day} {auto_execution_hour:02d}:{auto_execution_minute:02d}")
+        
         setup_scheduler(bot)
+        print("🚀 스케줄러 시작됨")
         print("✅ 스케줄러 설정 완료")
     except Exception as e:
         print(f"❌ 스케줄러 설정 실패: {e}")
+        import traceback
+        traceback.print_exc()
         
     print("🚀 봇이 완전히 준비되었습니다!")
 
 @bot.event
 async def on_member_join(member):
     """새로운 멤버가 서버에 들어올 때 자동으로 대기열에 추가"""
-    if not config.AUTO_ADD_NEW_MEMBERS:
-        return
-    
-    from queue_manager import queue_manager
-    
-    print(f"👋 새 멤버 입장: {member.display_name} ({member.id})")
-    
-    # 예외 사용자인지 확인
-    if exception_manager and exception_manager.is_exception_user(member.id):
-        print(f"🚫 예외 사용자이므로 대기열 추가 제외: {member.display_name} ({member.id})")
+    try:
+        print(f"👋 새 멤버 입장 감지: {member.display_name} ({member.id})")
         
-        # 예외 사용자용 환영 메시지 (선택사항)
+        # AUTO_ADD_NEW_MEMBERS 설정 확인 (기본값: True)
+        auto_add_enabled = getattr(config, 'AUTO_ADD_NEW_MEMBERS', True)
+        if not auto_add_enabled:
+            print(f"⚠️ 자동 추가 비활성화 상태 - {member.display_name} 건너뜀")
+            return
+        
+        # queue_manager 로드
         try:
-            if config.WELCOME_CHANNEL_ID:
-                welcome_channel = bot.get_channel(config.WELCOME_CHANNEL_ID)
+            from queue_manager import queue_manager
+        except ImportError as e:
+            print(f"❌ queue_manager 로드 실패: {e}")
+            return
+        
+        # 예외 사용자 확인 (두 가지 방법으로 확인)
+        is_exception = False
+        
+        # 방법 1: exception_manager 사용
+        if exception_manager:
+            try:
+                is_exception = exception_manager.is_exception(member.id)
+                print(f"🔍 exception_manager 확인: {member.display_name} -> 예외 사용자: {is_exception}")
+            except Exception as e:
+                print(f"⚠️ exception_manager 확인 오류: {e}")
+        
+        # 방법 2: scheduler의 is_exception_user 함수 사용 (fallback)
+        if not is_exception and is_exception_user:
+            try:
+                is_exception = is_exception_user(member.id)
+                print(f"🔍 scheduler 확인: {member.display_name} -> 예외 사용자: {is_exception}")
+            except Exception as e:
+                print(f"⚠️ scheduler 예외 확인 오류: {e}")
+        
+        # 예외 사용자 처리
+        if is_exception:
+            print(f"🚫 예외 사용자이므로 대기열 추가 제외: {member.display_name} ({member.id})")
+            
+            # 예외 사용자용 환영 메시지 (선택사항)
+            try:
+                welcome_channel_id = getattr(config, 'WELCOME_CHANNEL_ID', None)
+                if welcome_channel_id:
+                    welcome_channel = bot.get_channel(welcome_channel_id)
+                    if welcome_channel:
+                        await welcome_channel.send(
+                            f"🎉 {member.mention}님 환영합니다! "
+                            f"예외 설정으로 인해 자동 인증 대상에서 제외됩니다."
+                        )
+                        print(f"📨 예외 사용자 환영 메시지 전송됨: {member.display_name}")
+            except Exception as e:
+                print(f"⚠️ 예외 사용자 환영 메시지 전송 실패: {e}")
+            return
+        
+        # 대기열에 추가
+        try:
+            # 이미 대기열에 있는지 확인
+            if hasattr(queue_manager, 'is_user_in_queue') and queue_manager.is_user_in_queue(member.id):
+                print(f"ℹ️ 이미 대기열에 있음: {member.display_name}")
+            else:
+                queue_manager.add_user(member.id)
+                print(f"✅ 대기열에 추가됨: {member.display_name} (현재 대기열: {queue_manager.get_queue_size()}명)")
+                
+                # 성공 채널에 알림 (선택사항)
+                try:
+                    success_channel = bot.get_channel(config.SUCCESS_CHANNEL_ID)
+                    if success_channel:
+                        await success_channel.send(f"📝 새 멤버 대기열 추가: {member.mention} (대기: {queue_manager.get_queue_size()}명)")
+                except Exception as e:
+                    print(f"⚠️ 대기열 추가 알림 전송 실패: {e}")
+        except Exception as e:
+            print(f"❌ 대기열 추가 실패: {member.display_name} - {e}")
+            return
+        
+        # 환영 메시지
+        try:
+            welcome_channel_id = getattr(config, 'WELCOME_CHANNEL_ID', None)
+            if welcome_channel_id:
+                welcome_channel = bot.get_channel(welcome_channel_id)
                 if welcome_channel:
                     await welcome_channel.send(
                         f"🎉 {member.mention}님 환영합니다! "
-                        f"예외 설정으로 인해 자동 인증 대상에서 제외됩니다."
+                        f"마인크래프트 계정 연동을 위해 자동으로 인증 대기열에 추가되었습니다. "
+                        f"잠시만 기다려주세요! (현재 대기: {queue_manager.get_queue_size()}명)"
                     )
+                    print(f"📨 환영 메시지 전송됨: {member.display_name}")
+            else:
+                print(f"ℹ️ 환영 채널이 설정되지 않음 (WELCOME_CHANNEL_ID)")
         except Exception as e:
-            print(f"⚠️ 예외 사용자 환영 메시지 전송 실패: {e}")
-        return
-    
-    # 대기열에 추가
-    queue_manager.add_user(member.id)
-    print(f"📝 대기열에 자동 추가됨: {member.display_name}")
-    
-    # 환영 메시지 (선택사항)
-    try:
-        if config.WELCOME_CHANNEL_ID:
-            welcome_channel = bot.get_channel(config.WELCOME_CHANNEL_ID)
-            if welcome_channel:
-                await welcome_channel.send(
-                    f"🎉 {member.mention}님 환영합니다! "
-                    f"마인크래프트 계정 연동을 위해 자동으로 인증 대기열에 추가되었습니다. "
-                    f"잠시만 기다려주세요!"
-                )
+            print(f"⚠️ 환영 메시지 전송 실패: {e}")
+            
     except Exception as e:
-        print(f"⚠️ 환영 메시지 전송 실패: {e}")
+        print(f"❌ on_member_join 이벤트 처리 중 오류: {e}")
+        import traceback
+        traceback.print_exc()
 
 @bot.event
 async def on_error(event, *args, **kwargs):
@@ -135,73 +221,15 @@ async def load_extensions():
     
     for extension in extensions:
         try:
+            # 이미 로드된 경우 언로드 후 다시 로드
+            if extension in bot.extensions:
+                await bot.unload_extension(extension)
             await bot.load_extension(extension)
             print(f"✅ 확장 로드됨: {extension}")
         except Exception as e:
             print(f"❌ 확장 로드 실패 {extension}: {e}")
-
-# 디버그용 명령어 추가
-@bot.tree.command(name="테스트", description="봇이 작동하는지 테스트")
-async def test_command(interaction: discord.Interaction):
-    """봇 테스트 명령어"""
-    embed = discord.Embed(title="🤖 봇 상태 테스트", color=0x00ff00)
-    embed.add_field(name="상태", value="✅ 정상 작동 중", inline=False)
-    embed.add_field(name="지연시간", value=f"{round(bot.latency * 1000)}ms", inline=True)
-    embed.add_field(name="서버", value=interaction.guild.name, inline=True)
-    embed.add_field(name="채널", value=interaction.channel.name, inline=True)
-    
-    # 예외 관리자 상태 추가
-    if exception_manager:
-        exception_count = len(exception_manager.get_exception_users_list())
-        embed.add_field(name="예외 사용자", value=f"{exception_count}명", inline=True)
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# 예외 관리 명령어 추가 (관리자용)
-@bot.tree.command(name="예외상태", description="예외 사용자 현황을 확인합니다")
-async def exception_status_command(interaction: discord.Interaction):
-    """예외 사용자 현황 확인 명령어"""
-    # 관리자 권한 확인
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ 이 명령어는 관리자만 사용할 수 있습니다.", ephemeral=True)
-        return
-    
-    if not exception_manager:
-        await interaction.response.send_message("❌ 예외 관리자가 로드되지 않았습니다.", ephemeral=True)
-        return
-    
-    try:
-        exception_users = exception_manager.get_exception_users_list()
-        
-        if not exception_users:
-            embed = discord.Embed(
-                title="🚫 예외 사용자 현황",
-                description="현재 예외 설정된 사용자가 없습니다.",
-                color=0x95a5a6
-            )
-        else:
-            guild = interaction.guild
-            user_info_list = []
-            
-            for user_id in exception_users:
-                member = guild.get_member(int(user_id))
-                if member:
-                    user_info_list.append(f"• {member.display_name} ({member.mention})")
-                else:
-                    user_info_list.append(f"• <@{user_id}> (서버에 없음)")
-            
-            embed = discord.Embed(
-                title="🚫 예외 사용자 현황",
-                description=f"총 **{len(exception_users)}명**의 사용자가 예외 설정되어 있습니다.\n\n" + 
-                           "\n".join(user_info_list),
-                color=0xff6b6b
-            )
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        
-    except Exception as e:
-        print(f"❌ 예외상태 명령어 처리 오류: {e}")
-        await interaction.response.send_message("❌ 명령어 처리 중 오류가 발생했습니다.", ephemeral=True)
+            import traceback
+            traceback.print_exc()
 
 async def main():
     """메인 실행 함수"""
@@ -220,6 +248,8 @@ async def main():
         print("💡 Discord Developer Portal에서 새로운 토큰을 생성해주세요.")
     except Exception as e:
         print(f"❌ 봇 실행 중 오류: {e}")
+        import traceback
+        traceback.print_exc()
 
 # 메인 실행
 if __name__ == "__main__":
@@ -231,4 +261,6 @@ if __name__ == "__main__":
         print("\n👋 봇이 안전하게 종료됩니다...")
     except Exception as e:
         print(f"❌ 치명적 오류: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
