@@ -337,6 +337,7 @@ class SlashCommands(commands.Cog):
             )
 
     @app_commands.command(name="테스트", description="봇의 기본 기능을 테스트합니다")
+    @app_commands.check(is_admin)
     async def 테스트(self, interaction: discord.Interaction):
         """봇 테스트 명령어"""
         await interaction.response.defer(thinking=True)
@@ -1078,6 +1079,112 @@ class SlashCommands(commands.Cog):
         except Exception as e:
             await interaction.response.send_message(f"❌ 오류: {str(e)}", ephemeral=True)
 
+    @app_commands.command(name="도움말", description="봇의 모든 명령어를 확인합니다")
+    async def 도움말(self, interaction: discord.Interaction):
+        """봇의 모든 명령어와 설명을 표시"""
+        
+        # 관리자 권한 확인
+        is_admin = interaction.user.guild_permissions.administrator
+        
+        embed = discord.Embed(
+            title="🤖 국민확인봇 도움말",
+            description="사용 가능한 명령어 목록입니다.",
+            color=0x00bfff
+        )
+        
+        # 모든 슬래시 명령어 가져오기
+        commands = self.bot.tree.get_commands()
+        
+        # 일반 사용자용 명령어
+        user_commands = []
+        # 관리자 전용 명령어
+        admin_commands = []
+        
+        for cmd in commands:
+            # 명령어 정보 구성
+            cmd_info = f"`/{cmd.name}` - {cmd.description}"
+            
+            # 파라미터가 있는 경우 추가
+            if hasattr(cmd, '_params') and cmd._params:
+                params = []
+                for param_name, param in cmd._params.items():
+                    if hasattr(param, 'description') and param.description:
+                        params.append(f"{param_name}: {param.description}")
+                    else:
+                        params.append(param_name)
+                
+                if params:
+                    cmd_info += f"\n  📝 매개변수: {', '.join(params)}"
+            
+            # 관리자 전용 명령어인지 확인 (checks 속성 확인)
+            is_admin_only = False
+            if hasattr(cmd, 'checks') and cmd.checks:
+                for check in cmd.checks:
+                    # check 함수명이나 속성으로 관리자 전용인지 판단
+                    if hasattr(check, '__name__') and 'admin' in check.__name__.lower():
+                        is_admin_only = True
+                        break
+                    # 또는 check 함수의 코드를 확인
+                    if hasattr(check, '__code__'):
+                        code_names = check.__code__.co_names
+                        if 'administrator' in code_names:
+                            is_admin_only = True
+                            break
+            
+            # 명령어별로 관리자 전용 여부를 수동으로 확인 (위의 자동 확인이 실패할 수 있으므로)
+            admin_only_commands = [
+                "스케줄확인", "자동실행시작", "예외설정", "국민확인", "테스트",
+                "대기열상태", "대기열초기화", "자동실행"
+            ]
+            
+            if cmd.name in admin_only_commands:
+                is_admin_only = True
+            
+            if is_admin_only:
+                admin_commands.append(cmd_info)
+            else:
+                user_commands.append(cmd_info)
+        
+        # 일반 사용자 명령어 추가
+        if user_commands:
+            embed.add_field(
+                name="👥 일반 사용자 명령어",
+                value="\n\n".join(user_commands),
+                inline=False
+            )
+        
+        # 관리자 명령어 추가 (관리자인 경우에만)
+        if admin_commands and is_admin:
+            embed.add_field(
+                name="🛡️ 관리자 전용 명령어",
+                value="\n\n".join(admin_commands),
+                inline=False
+            )
+        elif admin_commands and not is_admin:
+            embed.add_field(
+                name="🛡️ 관리자 전용 명령어",
+                value=f"관리자 전용 명령어 **{len(admin_commands)}개**가 있습니다.\n관리자 권한이 필요합니다.",
+                inline=False
+            )
+        
+        # 추가 정보
+        embed.add_field(
+            name="ℹ️ 추가 정보",
+            value=(
+                f"• **기본 국가**: {BASE_NATION}\n"
+                f"• **API 엔드포인트**: {MC_API_BASE or '설정되지 않음'}\n"
+                f"• 문의사항이 있으시면 관리자에게 연락해주세요."
+            ),
+            inline=False
+        )
+        
+        # 푸터 추가
+        embed.set_footer(
+            text=f"명령어 총 {len(commands)}개 • 권한: {'관리자' if is_admin else '일반 사용자'}"
+        )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @확인.error
     @테스트.error
     @스케줄확인.error
@@ -1087,6 +1194,7 @@ class SlashCommands(commands.Cog):
     @대기열상태.error
     @대기열초기화.error
     @자동실행.error
+    @도움말.error
     async def on_app_command_error(self, interaction: discord.Interaction, error):
         # 이미 응답된 상호작용인지 확인
         if interaction.response.is_done():
