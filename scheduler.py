@@ -11,6 +11,17 @@ import re
 from queue_manager import queue_manager
 from exception_manager import exception_manager
 
+# town_role_manager 안전하게 import
+try:
+    from town_role_manager import town_role_manager
+    print("✅ town_role_manager 모듈 로드됨 (scheduler.py)")
+    TOWN_ROLE_ENABLED = True
+except ImportError as e:
+    print(f"⚠️ town_role_manager 모듈을 로드할 수 없습니다 (scheduler.py): {e}")
+    print("📝 마을 역할 기능이 비활성화됩니다.")
+    town_role_manager = None
+    TOWN_ROLE_ENABLED = False
+
 # config.py에서 환경변수 가져오기
 try:
     from config import config
@@ -49,7 +60,8 @@ def is_exception_user(user_id: int) -> bool:
         return False
 
 def setup_scheduler(bot):
-    """스케줄러 설정 함수 (main.py에서 호출)"""
+    """스케줄러 설정 함수 (main.py에서 호출) - 누락된 함수 추가"""
+    print("🔧 스케줄러 설정 시작...")
     start_scheduler(bot)
 
 def get_scheduler_info():
@@ -175,6 +187,109 @@ async def send_log_message(bot, channel_id: int, embed: discord.Embed):
         
     except Exception as e:
         print(f"❌ 로그 메시지 전송 실패: {e}")
+
+async def update_user_info(member, mc_id, nation, guild, town=None):
+    """사용자 정보 업데이트 (역할, 닉네임) - 매핑된 마을 역할 사용"""
+    changes = []
+    
+    try:
+        # 새 닉네임 생성 (기존 닉네임을 고려하여)
+        current_nickname = member.display_name
+        new_nickname = create_nickname(mc_id, nation, current_nickname)
+        
+        try:
+            if current_nickname != new_nickname:
+                await member.edit(nick=new_nickname)
+                changes.append(f"• 닉네임이 **``{new_nickname}``**로 변경됨")
+                print(f"  ✅ 닉네임 변경: {current_nickname} → {new_nickname}")
+            else:
+                print(f"  ℹ️ 닉네임 유지: {new_nickname}")
+        except discord.Forbidden:
+            changes.append("• ⚠️ 닉네임 변경 권한 없음")
+            print(f"  ⚠️ 닉네임 변경 권한 없음")
+        except Exception as e:
+            changes.append(f"• ⚠️ 닉네임 변경 실패: {str(e)[:50]}")
+            print(f"  ⚠️ 닉네임 변경 실패: {e}")
+
+        # 매핑된 마을 역할 처리 (안전하게)
+        if town and TOWN_ROLE_ENABLED and town_role_manager:
+            try:
+                role_id = town_role_manager.get_role_id(town)
+                if role_id:
+                    town_role = guild.get_role(role_id)
+                    if town_role:
+                        if town_role not in member.roles:
+                            await member.add_roles(town_role)
+                            changes.append(f"• **{town_role.name}** 마을 역할 추가됨")
+                            print(f"  ✅ 매핑된 마을 역할 부여: {town_role.name}")
+                        else:
+                            print(f"  ℹ️ 이미 마을 역할 보유: {town_role.name}")
+                    else:
+                        changes.append(f"• ⚠️ 마을 역할을 찾을 수 없음 (ID: {role_id})")
+                        print(f"  ⚠️ 마을 역할 없음: {role_id}")
+                else:
+                    print(f"  ℹ️ {town} 마을은 역할이 매핑되지 않음")
+            except Exception as e:
+                changes.append(f"• ⚠️ 마을 역할 처리 실패: {str(e)[:50]}")
+                print(f"  ⚠️ 마을 역할 처리 실패: {e}")
+        elif town and not TOWN_ROLE_ENABLED:
+            print(f"  ℹ️ {town} 마을 - 마을 역할 기능 비활성화됨")
+
+        # 국가별 역할 부여 (기존 로직)
+        if nation == BASE_NATION:
+            # 국민인 경우
+            if SUCCESS_ROLE_ID != 0:
+                success_role = guild.get_role(SUCCESS_ROLE_ID)
+                if success_role and success_role not in member.roles:
+                    try:
+                        await member.add_roles(success_role)
+                        changes.append(f"• **{success_role.name}** 역할 추가됨")
+                        print(f"  ✅ 국민 역할 부여: {success_role.name}")
+                    except Exception as e:
+                        changes.append(f"• ⚠️ 국민 역할 부여 실패: {str(e)[:50]}")
+                        print(f"  ⚠️ 국민 역할 부여 실패: {e}")
+            
+            # 비국민 역할 제거
+            if SUCCESS_ROLE_ID_OUT != 0:
+                out_role = guild.get_role(SUCCESS_ROLE_ID_OUT)
+                if out_role and out_role in member.roles:
+                    try:
+                        await member.remove_roles(out_role)
+                        changes.append(f"• **{out_role.name}** 역할 제거됨")
+                        print(f"  ✅ 비국민 역할 제거: {out_role.name}")
+                    except Exception as e:
+                        changes.append(f"• ⚠️ 비국민 역할 제거 실패: {str(e)[:50]}")
+                        print(f"  ⚠️ 비국민 역할 제거 실패: {e}")
+        else:
+            # 비국민인 경우
+            if SUCCESS_ROLE_ID_OUT != 0:
+                out_role = guild.get_role(SUCCESS_ROLE_ID_OUT)
+                if out_role and out_role not in member.roles:
+                    try:
+                        await member.add_roles(out_role)
+                        changes.append(f"• **{out_role.name}** 역할 추가됨")
+                        print(f"  ✅ 비국민 역할 부여: {out_role.name}")
+                    except Exception as e:
+                        changes.append(f"• ⚠️ 비국민 역할 부여 실패: {str(e)[:50]}")
+                        print(f"  ⚠️ 비국민 역할 부여 실패: {e}")
+            
+            # 국민 역할 제거
+            if SUCCESS_ROLE_ID != 0:
+                success_role = guild.get_role(SUCCESS_ROLE_ID)
+                if success_role and success_role in member.roles:
+                    try:
+                        await member.remove_roles(success_role)
+                        changes.append(f"• **{success_role.name}** 역할 제거됨")
+                        print(f"  ✅ 국민 역할 제거: {success_role.name}")
+                    except Exception as e:
+                        changes.append(f"• ⚠️ 국민 역할 제거 실패: {str(e)[:50]}")
+                        print(f"  ⚠️ 국민 역할 제거 실패: {e}")
+        
+        return changes
+        
+    except Exception as e:
+        print(f"❌ 사용자 정보 업데이트 실패: {e}")
+        return [f"• ❌ 업데이트 실패: {str(e)[:50]}"]
 
 async def manual_execute_auto_roles(bot):
     """자동 역할 부여를 수동으로 실행"""
@@ -319,7 +434,7 @@ def start_scheduler(bot):
         # 자동 역할 실행 작업 (매주 지정된 요일과 시간에)
         # 요일: 월(0), 화(1), 수(2), 목(3), 금(4), 토(5), 일(6)
         day_names = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
-        day_name = day_names[AUTO_EXECUTION_DAY]
+        day_name = day_names[AUTO_EXECUTION_DAY] if 0 <= AUTO_EXECUTION_DAY <= 6 else "알 수 없음"
         
         scheduler.add_job(
             execute_auto_roles,
@@ -343,6 +458,8 @@ def start_scheduler(bot):
         
     except Exception as e:
         print(f"❌ 스케줄러 시작 실패: {e}")
+        import traceback
+        traceback.print_exc()
 
 def stop_scheduler():
     """스케줄러 중지"""
@@ -395,7 +512,7 @@ async def process_queue_batch(bot):
         queue_manager.processing = False
 
 async def process_single_user(bot, session, user_id):
-    """단일 사용자 처리"""
+    """단일 사용자 처리 - 매핑된 마을 역할 포함"""
     member = None
     guild = None
     mc_id = None
@@ -507,12 +624,12 @@ async def process_single_user(bot, session, user_id):
             
             print(f"  ✅ 국가: {nation}")
         
-        # 역할 부여 및 닉네임 변경
-        role_changes = await update_user_info(member, mc_id, nation, guild)
+        # 역할 부여 및 닉네임 변경 (마을 정보 포함)
+        role_changes = await update_user_info(member, mc_id, nation, guild, town)
         
-        print(f"✅ 사용자 처리 완료: {member.display_name} ({nation})")
+        print(f"✅ 사용자 처리 완료: {member.display_name} ({nation}, {town})")
         
-        # 성공 로그 전송
+        # 성공 로그 전송 (마을 역할 정보 포함)
         if nation == BASE_NATION:
             embed = discord.Embed(
                 title="✅ 국민 확인 완료",
@@ -538,7 +655,36 @@ async def process_single_user(bot, session, user_id):
             inline=False
         )
         
+        # 마을 역할 연동 상태 표시
+        if TOWN_ROLE_ENABLED and town_role_manager:
+            role_id = town_role_manager.get_role_id(town)
+            if role_id:
+                town_role = guild.get_role(role_id)
+                if town_role:
+                    embed.add_field(
+                        name="🏘️ 마을 역할",
+                        value=f"**{town}** → {town_role.mention}",
+                        inline=False
+                    )
+                else:
+                    embed.add_field(
+                        name="🏘️ 마을 역할",
+                        value=f"**{town}** → ⚠️ 역할 없음 (ID: {role_id})",
+                        inline=False
+                    )
+            else:
+                embed.add_field(
+                    name="🏘️ 마을 역할",
+                    value=f"**{town}** → ℹ️ 역할 연동 안됨",
+                    inline=False
+                )
+        
         if role_changes:
+            # 너무 많은 변경사항이 있을 경우 요약
+            if len("\n".join(role_changes)) > 1000:
+                role_changes = role_changes[:8]  # 최대 8개만 표시
+                role_changes.append("• ...")
+            
             embed.add_field(
                 name="🔄 변경 사항",
                 value="\n".join(role_changes),
@@ -575,6 +721,17 @@ async def process_single_user(bot, session, user_id):
             minecraft_info = f"**마인크래프트 닉네임:** ``{mc_id}``"
             if town:
                 minecraft_info += f"\n**마을:** {town}"
+                # 마을 역할 연동 상태도 표시
+                if TOWN_ROLE_ENABLED and town_role_manager:
+                    role_id = town_role_manager.get_role_id(town)
+                    if role_id:
+                        town_role = guild.get_role(role_id) if guild else None
+                        if town_role:
+                            minecraft_info += f"\n**마을 역할:** {town_role.mention}"
+                        else:
+                            minecraft_info += f"\n**마을 역할:** ⚠️ 역할 없음 (ID: {role_id})"
+                    else:
+                        minecraft_info += f"\n**마을 역할:** ℹ️ 연동 안됨"
             if nation:
                 minecraft_info += f"\n**국가:** {nation}"
             
@@ -593,85 +750,6 @@ async def process_single_user(bot, session, user_id):
         embed.timestamp = datetime.now()
         
         await send_log_message(bot, FAILURE_CHANNEL_ID, embed)
-
-async def update_user_info(member, mc_id, nation, guild):
-    """사용자 정보 업데이트 (역할, 닉네임) 및 변경사항 반환"""
-    changes = []
-    
-    try:
-        # 새 닉네임 생성 (기존 닉네임을 고려하여)
-        current_nickname = member.display_name
-        new_nickname = create_nickname(mc_id, nation, current_nickname)
-        
-        try:
-            if current_nickname != new_nickname:
-                await member.edit(nick=new_nickname)
-                changes.append(f"• 닉네임이 **``{new_nickname}``**로 변경됨")
-                print(f"  ✅ 닉네임 변경: {current_nickname} → {new_nickname}")
-            else:
-                print(f"  ℹ️ 닉네임 유지: {new_nickname}")
-        except discord.Forbidden:
-            changes.append("• ⚠️ 닉네임 변경 권한 없음")
-            print(f"  ⚠️ 닉네임 변경 권한 없음")
-        except Exception as e:
-            changes.append(f"• ⚠️ 닉네임 변경 실패: {str(e)[:50]}")
-            print(f"  ⚠️ 닉네임 변경 실패: {e}")
-        
-        # 역할 부여
-        if nation == BASE_NATION:
-            # 국민인 경우
-            if SUCCESS_ROLE_ID != 0:
-                success_role = guild.get_role(SUCCESS_ROLE_ID)
-                if success_role and success_role not in member.roles:
-                    try:
-                        await member.add_roles(success_role)
-                        changes.append(f"• **{success_role.name}** 역할 추가됨")
-                        print(f"  ✅ 국민 역할 부여: {success_role.name}")
-                    except Exception as e:
-                        changes.append(f"• ⚠️ 국민 역할 부여 실패: {str(e)[:50]}")
-                        print(f"  ⚠️ 국민 역할 부여 실패: {e}")
-            
-            # 비국민 역할 제거
-            if SUCCESS_ROLE_ID_OUT != 0:
-                out_role = guild.get_role(SUCCESS_ROLE_ID_OUT)
-                if out_role and out_role in member.roles:
-                    try:
-                        await member.remove_roles(out_role)
-                        changes.append(f"• **{out_role.name}** 역할 제거됨")
-                        print(f"  ✅ 비국민 역할 제거: {out_role.name}")
-                    except Exception as e:
-                        changes.append(f"• ⚠️ 비국민 역할 제거 실패: {str(e)[:50]}")
-                        print(f"  ⚠️ 비국민 역할 제거 실패: {e}")
-        else:
-            # 비국민인 경우
-            if SUCCESS_ROLE_ID_OUT != 0:
-                out_role = guild.get_role(SUCCESS_ROLE_ID_OUT)
-                if out_role and out_role not in member.roles:
-                    try:
-                        await member.add_roles(out_role)
-                        changes.append(f"• **{out_role.name}** 역할 추가됨")
-                        print(f"  ✅ 비국민 역할 부여: {out_role.name}")
-                    except Exception as e:
-                        changes.append(f"• ⚠️ 비국민 역할 부여 실패: {str(e)[:50]}")
-                        print(f"  ⚠️ 비국민 역할 부여 실패: {e}")
-            
-            # 국민 역할 제거
-            if SUCCESS_ROLE_ID != 0:
-                success_role = guild.get_role(SUCCESS_ROLE_ID)
-                if success_role and success_role in member.roles:
-                    try:
-                        await member.remove_roles(success_role)
-                        changes.append(f"• **{success_role.name}** 역할 제거됨")
-                        print(f"  ✅ 국민 역할 제거: {success_role.name}")
-                    except Exception as e:
-                        changes.append(f"• ⚠️ 국민 역할 제거 실패: {str(e)[:50]}")
-                        print(f"  ⚠️ 국민 역할 제거 실패: {e}")
-        
-        return changes
-        
-    except Exception as e:
-        print(f"❌ 사용자 정보 업데이트 실패: {e}")
-        return [f"• ❌ 업데이트 실패: {str(e)[:50]}"]
 
 async def execute_auto_roles(bot):
     """자동 역할 실행 함수"""
