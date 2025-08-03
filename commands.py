@@ -32,6 +32,26 @@ except ImportError as e:
         def remove_exception(self, user_id): return True
     exception_manager = DummyExceptionManager()
 
+# callsign_manager 안전하게 import
+try:
+    from callsign_manager import callsign_manager, validate_callsign, get_user_display_info
+    print("✅ callsign_manager 모듈 로드됨 (commands.py)")
+    CALLSIGN_ENABLED = True
+except ImportError as e:
+    print(f"⚠️ callsign_manager 모듈을 로드할 수 없습니다 (commands.py): {e}")
+    print("📝 콜사인 기능이 비활성화됩니다.")
+    callsign_manager = None
+    CALLSIGN_ENABLED = False
+    
+    # 대체 함수 정의
+    def validate_callsign(callsign: str):
+        return False, "콜사인 기능이 비활성화됨"
+    
+    def get_user_display_info(user_id: int, mc_id: str = None, nation: str = None):
+        if nation:
+            return f"{mc_id} ㅣ {nation}"
+        return mc_id or 'Unknown'
+
 # town_role_manager 안전하게 import
 try:
     from town_role_manager import town_role_manager, get_towns_in_nation
@@ -321,6 +341,12 @@ class SlashCommands(commands.Cog):
                 "usage": "`/확인`",
                 "note": "마인크래프트 계정이 연동되어 있어야 합니다"
             },
+            "콜사인": {
+                "emoji": "🏷️",
+                "desc": "개인 콜사인을 설정합니다",
+                "usage": "`/콜사인 텍스트:콜사인이름`",
+                "note": "최대 20자, 국가명 대신 표시됩니다" if CALLSIGN_ENABLED else "콜사인 기능이 비활성화됨"
+            },
             "도움말": {
                 "emoji": "📖",
                 "desc": "봇의 모든 명령어를 확인합니다",
@@ -365,6 +391,10 @@ class SlashCommands(commands.Cog):
                 "국민확인": "사용자들의 국적을 확인합니다",
                 "예외설정": "자동실행 예외 대상을 관리합니다"
             }
+            
+            # 콜사인 관리 추가 (활성화된 경우)
+            if CALLSIGN_ENABLED:
+                user_mgmt_commands["콜사인관리"] = "사용자 콜사인을 관리합니다"
             
             for cmd_name, desc in user_mgmt_commands.items():
                 user_mgmt_text += f"👤 **`/{cmd_name}`** - {desc}\n"
@@ -424,9 +454,40 @@ class SlashCommands(commands.Cog):
                     value="🔴 **비활성화됨** - town_role_manager 모듈이 필요합니다.",
                     inline=False
                 )
+            
+            # 콜사인 기능 설명 (활성화된 경우에만)
+            if CALLSIGN_ENABLED:
+                callsign_text = (
+                    "🏷️ **`/콜사인 텍스트:콜사인이름`** - 개인 콜사인을 설정합니다\n"
+                    "🏷️ **`/콜사인관리 기능:목록`** - 설정된 콜사인 목록을 확인합니다\n"
+                    "🏷️ **`/콜사인관리 기능:제거`** - 사용자의 콜사인을 제거합니다\n"
+                    "🏷️ **`/콜사인관리 기능:초기화`** - 모든 콜사인을 삭제합니다"
+                )
+                
+                embed.add_field(
+                    name="🏷️ 콜사인 관리",
+                    value=callsign_text,
+                    inline=False
+                )
+                
+                # 콜사인 기능 설명 추가
+                embed.add_field(
+                    name="💡 콜사인 사용법",
+                    value="1. **개인 콜사인**: `/콜사인 텍스트:나만의콜사인`\n"
+                          "2. **자동 적용**: 국민 확인 시 국가명 대신 콜사인 사용\n"
+                          "3. **길이 제한**: 최대 20자까지 설정 가능\n"
+                          "4. **우선순위**: 콜사인 > 국가명 순으로 표시",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="🏷️ 콜사인 관리",
+                    value="🔴 **비활성화됨** - callsign_manager 모듈이 필요합니다.",
+                    inline=False
+                )
         else:
             # 관리자가 아닌 경우
-            total_admin_commands = 11  # 실제 관리자 명령어 수
+            total_admin_commands = 11 + (1 if CALLSIGN_ENABLED else 0) + (5 if TOWN_ROLE_ENABLED else 0)
             embed.add_field(
                 name="🛡️ 관리자 전용 명령어",
                 value=f"🔒 관리자 전용 명령어 **{total_admin_commands}개**가 있습니다.\n"
@@ -445,11 +506,19 @@ class SlashCommands(commands.Cog):
         except:
             town_mapping_count = 0
         
+        # 콜사인 상태 추가 (안전하게)
+        try:
+            callsign_count = callsign_manager.get_callsign_count() if CALLSIGN_ENABLED and callsign_manager else 0
+        except:
+            callsign_count = 0
+        
         status_text = (
             f"🌐 **API 상태**: {'🟢 연결됨' if MC_API_BASE else '🔴 설정 필요'}\n"
             f"🏴 **기본 국가**: {BASE_NATION}\n"
             f"🏘️ **마을 역할**: {'🟢 활성화' if TOWN_ROLE_ENABLED else '🔴 비활성화'}\n"
+            f"🏷️ **콜사인 기능**: {'🟢 활성화' if CALLSIGN_ENABLED else '🔴 비활성화'}\n"
             f"🎯 **연동된 마을**: {town_mapping_count}개\n"
+            f"🏷️ **설정된 콜사인**: {callsign_count}개\n"
             f"📋 **대기열**: {queue_size}명 ({processing_status})"
         )
         
@@ -462,8 +531,9 @@ class SlashCommands(commands.Cog):
         # 사용 팁
         tips_text = (
             "💡 `/확인` 명령어로 언제든 역할을 다시 받을 수 있어요!\n"
+            f"💡 {'`/콜사인`으로 개인 콜사인을 설정하세요.' if CALLSIGN_ENABLED else '콜사인 기능이 비활성화되어 있습니다.'}\n"
             "💡 마인크래프트 계정 연동이 필요합니다.\n"
-            "💡 관리자는 `/마을역할`로 마을 역할을 관리하세요.\n"
+            f"💡 {'관리자는 `/마을역할`로 마을 역할을 관리하세요.' if TOWN_ROLE_ENABLED else ''}\n"
             "💡 문제가 있다면 관리자에게 문의하세요."
         )
         
@@ -485,6 +555,351 @@ class SlashCommands(commands.Cog):
         embed.timestamp = datetime.datetime.now()
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="콜사인", description="개인 콜사인을 설정합니다")
+    @app_commands.describe(텍스트="설정할 콜사인 (최대 20자)")
+    async def 콜사인(self, interaction: discord.Interaction, 텍스트: str):
+        """사용자 콜사인 설정"""
+        
+        # 콜사인 기능이 비활성화된 경우
+        if not CALLSIGN_ENABLED:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="❌ 기능 비활성화",
+                    description="콜사인 기능이 비활성화되어 있습니다.\n"
+                              "`callsign_manager.py` 파일이 필요합니다.",
+                    color=0xff0000
+                ),
+                ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(thinking=True)
+        
+        user_id = interaction.user.id
+        callsign = 텍스트.strip()
+        
+        # 콜사인 유효성 검사
+        is_valid, message = validate_callsign(callsign)
+        if not is_valid:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="❌ 콜사인 설정 실패",
+                    description=f"**오류:** {message}",
+                    color=0xff0000
+                ),
+                ephemeral=True
+            )
+            return
+        
+        # 사용자의 국가 정보 확인
+        user_nation = None
+        mc_id = None
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # 1단계: 디스코드 ID → 마크 ID
+                url1 = f"{MC_API_BASE}/discord?discord={user_id}"
+                async with session.get(url1, timeout=aiohttp.ClientTimeout(total=10)) as r1:
+                    if r1.status == 200:
+                        data1 = await r1.json()
+                        if data1.get('data') and data1['data']:
+                            mc_id = data1['data'][0].get('name')
+                            if mc_id:
+                                time.sleep(2)
+                                
+                                # 2단계: 마크 ID → 마을
+                                url2 = f"{MC_API_BASE}/resident?name={mc_id}"
+                                async with session.get(url2, timeout=aiohttp.ClientTimeout(total=10)) as r2:
+                                    if r2.status == 200:
+                                        data2 = await r2.json()
+                                        if data2.get('data') and data2['data']:
+                                            town = data2['data'][0].get('town')
+                                            if town:
+                                                time.sleep(2)
+                                                
+                                                # 3단계: 마을 → 국가
+                                                url3 = f"{MC_API_BASE}/town?name={town}"
+                                                async with session.get(url3, timeout=aiohttp.ClientTimeout(total=10)) as r3:
+                                                    if r3.status == 200:
+                                                        data3 = await r3.json()
+                                                        if data3.get('data') and data3['data']:
+                                                            user_nation = data3['data'][0].get('nation')
+        except Exception as e:
+            print(f"⚠️ 콜사인 설정 시 국가 확인 오류: {e}")
+        
+        # 기존 콜사인 확인
+        old_callsign = callsign_manager.get_callsign(user_id)
+        
+        try:
+            # 콜사인 설정
+            callsign_manager.set_callsign(user_id, callsign)
+            
+            # 닉네임 변경 시도 (BASE_NATION 국민인 경우에만)
+            nickname_changed = False
+            nickname_change_msg = ""
+            
+            if user_nation == BASE_NATION and mc_id:
+                try:
+                    member = interaction.guild.get_member(user_id)
+                    if member:
+                        new_nickname = f"{mc_id} ㅣ {callsign}"
+                        await member.edit(nick=new_nickname)
+                        nickname_changed = True
+                        nickname_change_msg = f"• 닉네임이 **``{new_nickname}``**로 즉시 변경됨"
+                        print(f"✅ 콜사인 설정 후 즉시 닉네임 변경: {new_nickname}")
+                except discord.Forbidden:
+                    nickname_change_msg = "• ⚠️ 닉네임 변경 권한 없음"
+                except Exception as e:
+                    nickname_change_msg = f"• ⚠️ 닉네임 변경 실패: {str(e)[:50]}"
+            elif user_nation and user_nation != BASE_NATION:
+                nickname_change_msg = f"• ℹ️ {BASE_NATION} 국민이 아니므로 닉네임 변경 안됨"
+            elif not user_nation:
+                nickname_change_msg = "• ⚠️ 국가 정보 확인 불가로 닉네임 변경 안됨"
+            
+            # 응답 메시지 생성
+            if old_callsign:
+                embed = discord.Embed(
+                    title="✅ 콜사인 변경 완료",
+                    description=f"콜사인이 **{callsign}**로 변경되었습니다.",
+                    color=0x00ff00
+                )
+                embed.add_field(
+                    name="📋 변경 내역",
+                    value=f"• **이전:** {old_callsign}\n• **현재:** {callsign}",
+                    inline=False
+                )
+            else:
+                embed = discord.Embed(
+                    title="✅ 콜사인 설정 완료",
+                    description=f"콜사인이 **{callsign}**로 설정되었습니다.",
+                    color=0x00ff00
+                )
+            
+            # 닉네임 변경 결과 추가
+            if nickname_change_msg:
+                embed.add_field(
+                    name="🔄 닉네임 변경",
+                    value=nickname_change_msg,
+                    inline=False
+                )
+            
+            # 국가별 안내 메시지
+            if user_nation == BASE_NATION:
+                if nickname_changed:
+                    embed.add_field(
+                        name="💡 안내",
+                        value=f"• {BASE_NATION} 국민이므로 콜사인이 즉시 적용되었습니다.\n"
+                              "• 마인크래프트 정보가 변경되면 `/확인` 명령어를 사용하세요.",
+                        inline=False
+                    )
+                else:
+                    embed.add_field(
+                        name="💡 안내",
+                        value=f"• {BASE_NATION} 국민이므로 다음 `/확인` 시 콜사인이 적용됩니다.\n"
+                              "• `/확인` 명령어로 즉시 적용할 수 있습니다.",
+                        inline=False
+                    )
+            elif user_nation:
+                embed.add_field(
+                    name="💡 안내",
+                    value=f"• 현재 **{user_nation}** 소속으로 확인됩니다.\n"
+                          f"• {BASE_NATION} 국민이 아니므로 콜사인이 닉네임에 적용되지 않습니다.\n"
+                          f"• {BASE_NATION}으로 이주 후 `/확인` 명령어를 사용하세요.",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="💡 안내",
+                    value="• 국가 정보를 확인할 수 없습니다.\n"
+                          "• 마인크래프트 계정 연동을 확인하고 `/확인` 명령어를 사용하세요.\n"
+                          f"• {BASE_NATION} 국민인 경우에만 콜사인이 적용됩니다.",
+                    inline=False
+                )
+            
+            # 콜사인 형식 안내
+            if user_nation == BASE_NATION:
+                embed.add_field(
+                    name="🏷️ 적용된 닉네임 형식",
+                    value=f"**형식:** `{mc_id or '마인크래프트닉네임'} ㅣ {callsign}`",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="🏷️ 닉네임 형식 (참고용)",
+                    value=f"**{BASE_NATION} 국민 시:** `마인크래프트닉네임 ㅣ {callsign}`\n"
+                          f"**현재 ({user_nation or '확인불가'}):** `마인크래프트닉네임 ㅣ {user_nation or '국가명'}`",
+                    inline=False
+                )
+            
+            print(f"✅ 콜사인 설정: {interaction.user.display_name} ({user_id}) -> {callsign} (국가: {user_nation})")
+            
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ 오류 발생",
+                description=f"콜사인 설정 중 오류가 발생했습니다.\n{str(e)}",
+                color=0xff0000
+            )
+            print(f"❌ 콜사인 설정 오류: {e}")
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="콜사인관리", description="콜사인을 관리합니다 (관리자 전용)")
+    @app_commands.describe(
+        기능="수행할 작업을 선택하세요",
+        대상="(제거 시만) 대상 사용자 멘션 또는 사용자 ID"
+    )
+    @app_commands.check(is_admin)
+    async def 콜사인관리(
+        self,
+        interaction: discord.Interaction,
+        기능: Literal["목록", "제거", "초기화"],
+        대상: str = None
+    ):
+        """콜사인 관리 (관리자 전용)"""
+        
+        # 콜사인 기능이 비활성화된 경우
+        if not CALLSIGN_ENABLED:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="❌ 기능 비활성화",
+                    description="콜사인 기능이 비활성화되어 있습니다.\n"
+                              "`callsign_manager.py` 파일이 필요합니다.",
+                    color=0xff0000
+                ),
+                ephemeral=True
+            )
+            return
+        
+        if 기능 == "목록":
+            # 콜사인 목록 표시
+            try:
+                all_callsigns = callsign_manager.get_all_callsigns()
+                
+                embed = discord.Embed(
+                    title="📋 콜사인 목록",
+                    color=0x00bfff
+                )
+                
+                if not all_callsigns:
+                    embed.description = "현재 설정된 콜사인이 없습니다."
+                else:
+                    embed.description = f"총 **{len(all_callsigns)}개**의 콜사인이 설정되어 있습니다."
+                    
+                    # 10개씩 나누어서 표시
+                    items = list(all_callsigns.items())
+                    for i in range(0, len(items), 10):
+                        chunk = items[i:i+10]
+                        field_items = []
+                        
+                        for user_id, callsign in chunk:
+                            field_items.append(f"• <@{user_id}> → **{callsign}**")
+                        
+                        embed.add_field(
+                            name=f"콜사인 목록 ({i+1}-{min(i+10, len(items))})",
+                            value="\n".join(field_items),
+                            inline=False
+                        )
+                        
+            except Exception as e:
+                embed = discord.Embed(
+                    title="❌ 오류",
+                    description=f"콜사인 목록을 가져오는 중 오류가 발생했습니다.\n{str(e)}",
+                    color=0xff0000
+                )
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        elif 기능 == "초기화":
+            # 모든 콜사인 삭제
+            try:
+                cleared_count = callsign_manager.clear_all_callsigns()
+                
+                embed = discord.Embed(
+                    title="🧹 콜사인 초기화 완료",
+                    description=f"**{cleared_count}개**의 콜사인이 모두 삭제되었습니다.",
+                    color=0xff6600
+                )
+                
+                embed.add_field(
+                    name="⚠️ 주의사항",
+                    value="삭제된 콜사인은 복구할 수 없습니다.\n"
+                          "사용자들이 다시 설정해야 합니다.",
+                    inline=False
+                )
+                
+            except Exception as e:
+                embed = discord.Embed(
+                    title="❌ 오류 발생",
+                    description=f"콜사인 초기화 중 오류가 발생했습니다.\n{str(e)}",
+                    color=0xff0000
+                )
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        elif 기능 == "제거":
+            # 특정 사용자 콜사인 제거
+            if not 대상:
+                await interaction.response.send_message(
+                    "❌ 제거 기능을 사용할 때는 대상을 입력해야 합니다.\n"
+                    "예: `/콜사인관리 기능:제거 대상:@사용자` 또는 `/콜사인관리 기능:제거 대상:123456789`",
+                    ephemeral=True
+                )
+                return
+            
+            # 멘션 형식 처리
+            target_clean = 대상.replace('<@', '').replace('>', '').replace('!', '')
+            
+            try:
+                user_id = int(target_clean)
+            except ValueError:
+                await interaction.response.send_message(
+                    "❌ 올바른 사용자 ID 또는 멘션을 입력해주세요.\n"
+                    "예: `@사용자` 또는 `123456789`",
+                    ephemeral=True
+                )
+                return
+            
+            # 사용자 존재 확인 (선택사항)
+            guild = interaction.guild
+            member = guild.get_member(user_id)
+            user_mention = member.mention if member else f"<@{user_id}>"
+            user_name = member.display_name if member else f"ID: {user_id}"
+            
+            # 콜사인 제거
+            try:
+                old_callsign = callsign_manager.get_callsign(user_id)
+                
+                if callsign_manager.remove_callsign(user_id):
+                    embed = discord.Embed(
+                        title="✅ 콜사인 제거 완료",
+                        description=f"{user_mention}님의 콜사인을 제거했습니다.",
+                        color=0x00ff00
+                    )
+                    
+                    if old_callsign:
+                        embed.add_field(
+                            name="📋 제거된 콜사인",
+                            value=f"**{old_callsign}**",
+                            inline=False
+                        )
+                else:
+                    embed = discord.Embed(
+                        title="⚠️ 콜사인 없음",
+                        description=f"{user_mention}님은 콜사인을 설정하지 않았습니다.",
+                        color=0xffaa00
+                    )
+                    
+            except Exception as e:
+                embed = discord.Embed(
+                    title="❌ 오류 발생",
+                    description=f"콜사인 제거 중 오류가 발생했습니다.\n{str(e)}",
+                    color=0xff0000
+                )
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="마을역할", description="마을과 역할을 연동합니다")
     @app_commands.describe(
@@ -734,7 +1149,7 @@ class SlashCommands(commands.Cog):
 
     @app_commands.command(name="확인", description="자신의 국적을 확인하고 역할을 받습니다")
     async def 확인(self, interaction: discord.Interaction):
-        """사용자 본인의 국적 확인 및 역할 부여 - 마을 역할 포함"""
+        """사용자 본인의 국적 확인 및 역할 부여 - 마을 역할 및 콜사인 포함"""
         await interaction.response.defer(thinking=True)
         
         member = interaction.user
@@ -896,8 +1311,23 @@ class SlashCommands(commands.Cog):
                 )
                 return
 
-            # 새 닉네임 설정
-            new_nickname = f"{mc_id} ㅣ {nation}"
+            # 새 닉네임 설정 (콜사인 고려 - BASE_NATION 국민만)
+            if CALLSIGN_ENABLED and callsign_manager and nation == BASE_NATION:
+                try:
+                    user_callsign = callsign_manager.get_callsign(discord_id)
+                    if user_callsign:
+                        new_nickname = f"{mc_id} ㅣ {user_callsign}"
+                        print(f"  🏷️ BASE_NATION 국민 콜사인 적용: {user_callsign}")
+                    else:
+                        new_nickname = f"{mc_id} ㅣ {nation}"
+                        print(f"  🏴 BASE_NATION 국민 콜사인 없음: 국가명 사용")
+                except Exception as e:
+                    print(f"  ⚠️ 콜사인 확인 오류: {e}")
+                    new_nickname = f"{mc_id} ㅣ {nation}"
+            else:
+                new_nickname = f"{mc_id} ㅣ {nation}"
+                if nation != BASE_NATION:
+                    print(f"  🌍 다른 국가 소속으로 콜사인 미적용: {nation}")
             
             # 변경 사항 추적
             changes = []
@@ -906,7 +1336,7 @@ class SlashCommands(commands.Cog):
                 # 닉네임 변경
                 if member.display_name != new_nickname:
                     await member.edit(nick=new_nickname)
-                    changes.append(f"• 닉네임이 **{new_nickname}**로 변경됨")
+                    changes.append(f"• 닉네임이 **``{new_nickname}``**로 변경됨")
                     print(f"  ✅ 닉네임 변경: {new_nickname}")
                 else:
                     print(f"  ℹ️ 닉네임 유지: {new_nickname}")
@@ -1026,6 +1456,39 @@ class SlashCommands(commands.Cog):
                 value=f"**닉네임:** {mc_id}\n**마을:** {town}\n**국가:** {nation}",
                 inline=False
             )
+            
+            # 콜사인 정보 표시 (국가별로 다르게 표시)
+            if CALLSIGN_ENABLED and callsign_manager:
+                try:
+                    user_callsign = callsign_manager.get_callsign(discord_id)
+                    if user_callsign:
+                        if nation == BASE_NATION:
+                            embed.add_field(
+                                name="🏷️ 콜사인 정보",
+                                value=f"**설정된 콜사인:** {user_callsign}\n**닉네임에 표시:** 콜사인 우선 ✅\n💡 {BASE_NATION} 국민이므로 콜사인이 적용됩니다.",
+                                inline=False
+                            )
+                        else:
+                            embed.add_field(
+                                name="🏷️ 콜사인 정보",
+                                value=f"**설정된 콜사인:** {user_callsign}\n**닉네임에 표시:** 실제 국가명 우선 ⚠️\n💡 {BASE_NATION} 국민이 아니므로 콜사인이 적용되지 않습니다.",
+                                inline=False
+                            )
+                    else:
+                        if nation == BASE_NATION:
+                            embed.add_field(
+                                name="🏷️ 콜사인 정보",
+                                value="**설정된 콜사인:** 없음\n**닉네임에 표시:** 국가명 사용\n💡 `/콜사인` 명령어로 설정하면 국가명 대신 표시됩니다.",
+                                inline=False
+                            )
+                        else:
+                            embed.add_field(
+                                name="🏷️ 콜사인 정보", 
+                                value=f"**설정된 콜사인:** 없음\n**닉네임에 표시:** 실제 국가명 사용\n💡 {BASE_NATION} 국민이 아니므로 콜사인 기능을 사용할 수 없습니다.",
+                                inline=False
+                            )
+                except:
+                    pass
             
             # 마을 역할 연동 상태 표시
             if TOWN_ROLE_ENABLED and town_role_manager:
@@ -1268,6 +1731,7 @@ class SlashCommands(commands.Cog):
         env_status.append(f"BASE_NATION: {'✅' if BASE_NATION else '❌'}")
         env_status.append(f"SUCCESS_ROLE_ID: {'✅' if SUCCESS_ROLE_ID != 0 else '❌'}")
         env_status.append(f"TOWN_ROLE_ENABLED: {'✅' if TOWN_ROLE_ENABLED else '❌'}")
+        env_status.append(f"CALLSIGN_ENABLED: {'✅' if CALLSIGN_ENABLED else '❌'}")
         
         embed.add_field(
             name="⚙️ 환경변수 상태",
@@ -1305,6 +1769,22 @@ class SlashCommands(commands.Cog):
             except:
                 embed.add_field(
                     name="🏘️ 마을 역할 관리자",
+                    value="**상태:** 로드됨 (일부 기능 제한)",
+                    inline=False
+                )
+        
+        # 콜사인 관리자 상태
+        if CALLSIGN_ENABLED and callsign_manager:
+            try:
+                callsign_count = callsign_manager.get_callsign_count()
+                embed.add_field(
+                    name="🏷️ 콜사인 관리자",
+                    value=f"**설정된 콜사인:** {callsign_count}개",
+                    inline=False
+                )
+            except:
+                embed.add_field(
+                    name="🏷️ 콜사인 관리자",
                     value="**상태:** 로드됨 (일부 기능 제한)",
                     inline=False
                 )
@@ -1992,6 +2472,8 @@ class SlashCommands(commands.Cog):
     @자동실행.error
     @도움말.error
     @마을역할.error
+    @콜사인.error
+    @콜사인관리.error
     async def on_app_command_error(self, interaction: discord.Interaction, error):
         # 이미 응답된 상호작용인지 확인
         if interaction.response.is_done():
