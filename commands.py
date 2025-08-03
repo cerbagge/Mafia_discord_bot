@@ -6,8 +6,31 @@ import aiohttp
 import os
 import time
 
-from queue_manager import queue_manager
-from exception_manager import exception_manager
+# 안전한 import 처리
+try:
+    from queue_manager import queue_manager
+    print("✅ queue_manager 로드 성공")
+except ImportError as e:
+    print(f"❌ queue_manager 로드 실패: {e}")
+    # 더미 queue_manager 클래스 생성
+    class DummyQueueManager:
+        def get_queue_size(self): return 0
+        def is_processing(self): return False
+        def add_user(self, user_id): pass
+        def clear_queue(self): return 0
+    queue_manager = DummyQueueManager()
+
+try:
+    from exception_manager import exception_manager
+    print("✅ exception_manager 로드 성공")
+except ImportError as e:
+    print(f"❌ exception_manager 로드 실패: {e}")
+    # 더미 exception_manager 클래스 생성
+    class DummyExceptionManager:
+        def get_exceptions(self): return []
+        def add_exception(self, user_id): return True
+        def remove_exception(self, user_id): return True
+    exception_manager = DummyExceptionManager()
 
 # town_role_manager 안전하게 import
 try:
@@ -24,9 +47,7 @@ except ImportError as e:
     async def get_towns_in_nation(nation_name: str):
         """대체 함수: town_role_manager가 없을 때 기본 마을 목록 반환"""
         print(f"⚠️ town_role_manager가 없어서 대체 함수 사용: {nation_name}")
-        # 테스트용 기본 마을 목록 (실제로는 API에서 가져와야 함)
         try:
-            import aiohttp
             api_base = MC_API_BASE or "https://api.planetearth.kr"
             
             async with aiohttp.ClientSession() as session:
@@ -58,10 +79,11 @@ except ImportError as e:
             # 최후의 대체 마을 목록
             return ["Seoul", "Busan", "Incheon", "Daegu", "Daejeon", "Gwangju", "Ulsan"]
 
-MC_API_BASE = os.getenv("MC_API_BASE")  # 예: https://api.planetearth.kr
-BASE_NATION = os.getenv("BASE_NATION", "Red_Mafia")  # .env에서 국가 설정
-SUCCESS_ROLE_ID = int(os.getenv("SUCCESS_ROLE_ID", "0"))  # 국민 역할 ID
-SUCCESS_ROLE_ID_OUT = int(os.getenv("SUCCESS_ROLE_ID_OUT", "0"))  # 비국민 역할 ID
+# 환경변수 로드 - 기본값 설정
+MC_API_BASE = os.getenv("MC_API_BASE", "https://api.planetearth.kr")
+BASE_NATION = os.getenv("BASE_NATION", "Red_Mafia")
+SUCCESS_ROLE_ID = int(os.getenv("SUCCESS_ROLE_ID", "0"))
+SUCCESS_ROLE_ID_OUT = int(os.getenv("SUCCESS_ROLE_ID_OUT", "0"))
 
 # verify_town_in_nation 함수 추가
 async def verify_town_in_nation(town_name: str, nation_name: str) -> bool:
@@ -85,7 +107,6 @@ async def town_autocomplete(interaction: discord.Interaction, current: str) -> L
             
         # 캐시된 마을 목록이 있다면 사용 (빠른 응답을 위해)
         if hasattr(town_autocomplete, '_cached_towns') and hasattr(town_autocomplete, '_cache_time'):
-            import time
             current_time = time.time()
             # 캐시가 5분 이내라면 사용
             if current_time - town_autocomplete._cache_time < 300:
@@ -106,7 +127,6 @@ async def town_autocomplete(interaction: discord.Interaction, current: str) -> L
                 
                 # 캐시 저장
                 if towns:
-                    import time
                     town_autocomplete._cached_towns = towns
                     town_autocomplete._cache_time = time.time()
                     print(f"💾 마을 목록 캐시됨")
@@ -236,6 +256,7 @@ class SlashCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    @staticmethod
     def is_admin(interaction: discord.Interaction) -> bool:
         return interaction.user.guild_permissions.administrator
 
@@ -273,6 +294,197 @@ class SlashCommands(commands.Cog):
                 color=0x00bfff
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="도움말", description="봇의 모든 명령어를 확인합니다")
+    async def 도움말(self, interaction: discord.Interaction):
+        """봇의 모든 명령어와 설명을 표시 - 개선된 버전"""
+        
+        # 관리자 권한 확인
+        is_admin = interaction.user.guild_permissions.administrator
+        
+        # 메인 임베드 생성
+        embed = discord.Embed(
+            title="📖 국민확인봇 명령어 가이드",
+            description=f"안녕하세요 {interaction.user.mention}님! 🎉\n사용 가능한 명령어들을 확인해보세요.",
+            color=0x2f3136
+        )
+        
+        # 썸네일 추가 (봇 아바타)
+        if self.bot.user.avatar:
+            embed.set_thumbnail(url=self.bot.user.avatar.url)
+        
+        # 일반 사용자 명령어
+        user_commands_info = {
+            "확인": {
+                "emoji": "✅",
+                "desc": "자신의 국적을 확인하고 역할을 받습니다",
+                "usage": "`/확인`",
+                "note": "마인크래프트 계정이 연동되어 있어야 합니다"
+            },
+            "도움말": {
+                "emoji": "📖",
+                "desc": "봇의 모든 명령어를 확인합니다",
+                "usage": "`/도움말`",
+                "note": "언제든지 사용 가능합니다"
+            }
+        }
+        
+        user_cmd_text = ""
+        for cmd_name, info in user_commands_info.items():
+            user_cmd_text += f"{info['emoji']} **{info['usage']}**\n"
+            user_cmd_text += f"   └ {info['desc']}\n"
+            user_cmd_text += f"   └ 💡 *{info['note']}*\n\n"
+        
+        embed.add_field(
+            name="👥 일반 사용자 명령어",
+            value=user_cmd_text.strip(),
+            inline=False
+        )
+        
+        # 관리자 명령어 - 카테고리별로 분류
+        if is_admin:
+            # 기본 관리 명령어
+            basic_admin_text = ""
+            basic_admin_commands = {
+                "테스트": "봇의 기본 기능을 테스트합니다",
+                "스케줄확인": "자동 실행 스케줄 정보를 확인합니다"
+            }
+            
+            for cmd_name, desc in basic_admin_commands.items():
+                basic_admin_text += f"🔧 **`/{cmd_name}`** - {desc}\n"
+            
+            embed.add_field(
+                name="🛠️ 기본 관리 명령어",
+                value=basic_admin_text,
+                inline=True
+            )
+            
+            # 사용자 관리 명령어
+            user_mgmt_text = ""
+            user_mgmt_commands = {
+                "국민확인": "사용자들의 국적을 확인합니다",
+                "예외설정": "자동실행 예외 대상을 관리합니다"
+            }
+            
+            for cmd_name, desc in user_mgmt_commands.items():
+                user_mgmt_text += f"👤 **`/{cmd_name}`** - {desc}\n"
+            
+            embed.add_field(
+                name="👥 사용자 관리",
+                value=user_mgmt_text,
+                inline=True
+            )
+            
+            # 대기열 관리 명령어
+            queue_mgmt_text = ""
+            queue_mgmt_commands = {
+                "대기열상태": "현재 대기열 상태를 확인합니다",
+                "대기열초기화": "대기열을 모두 비웁니다",
+                "자동실행시작": "자동 역할 부여를 수동으로 시작합니다",
+                "자동실행": "자동 등록할 역할을 설정합니다"
+            }
+            
+            for cmd_name, desc in queue_mgmt_commands.items():
+                queue_mgmt_text += f"📋 **`/{cmd_name}`** - {desc}\n"
+            
+            embed.add_field(
+                name="📋 대기열 관리",
+                value=queue_mgmt_text,
+                inline=False
+            )
+            
+            # 마을 역할 관리 (활성화된 경우에만)
+            if TOWN_ROLE_ENABLED:
+                town_mgmt_text = (
+                    "🏘️ **`/마을역할 기능:추가`** - 마을과 역할을 연동합니다\n"
+                    "🏘️ **`/마을역할 기능:제거`** - 마을 역할 연동을 해제합니다\n"
+                    "🏘️ **`/마을역할 기능:목록`** - 연동된 마을-역할 목록을 확인합니다\n"
+                    "🏘️ **`/마을역할 기능:마을목록`** - 마을 연동 가이드를 확인합니다\n"
+                    "🧪 **`/마을테스트`** - 마을 검증 기능을 테스트합니다"
+                )
+                
+                embed.add_field(
+                    name="🏘️ 마을 역할 관리",
+                    value=town_mgmt_text,
+                    inline=False
+                )
+                
+                # 마을 역할 기능 설명 추가
+                embed.add_field(
+                    name="💡 마을 역할 연동 방법",
+                    value="1. **정확한 마을 이름** 입력\n"
+                          "2. **자동 검증** 후 결과 확인\n"
+                          "3. **버튼 선택**으로 연동 진행/취소\n"
+                          "4. **미검증 마을**도 수동 연동 가능",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="🏘️ 마을 역할 관리",
+                    value="🔴 **비활성화됨** - town_role_manager 모듈이 필요합니다.",
+                    inline=False
+                )
+        else:
+            # 관리자가 아닌 경우
+            total_admin_commands = 11  # 실제 관리자 명령어 수
+            embed.add_field(
+                name="🛡️ 관리자 전용 명령어",
+                value=f"🔒 관리자 전용 명령어 **{total_admin_commands}개**가 있습니다.\n"
+                      f"관리자 권한이 필요합니다.",
+                inline=False
+            )
+        
+        # 봇 상태 정보
+        queue_size = queue_manager.get_queue_size()
+        is_processing = queue_manager.is_processing()
+        processing_status = "🔄 처리 중" if is_processing else "⏸️ 대기 중"
+        
+        # 마을 역할 상태 추가 (안전하게)
+        try:
+            town_mapping_count = town_role_manager.get_mapping_count() if TOWN_ROLE_ENABLED and town_role_manager else 0
+        except:
+            town_mapping_count = 0
+        
+        status_text = (
+            f"🌐 **API 상태**: {'🟢 연결됨' if MC_API_BASE else '🔴 설정 필요'}\n"
+            f"🏴 **기본 국가**: {BASE_NATION}\n"
+            f"🏘️ **마을 역할**: {'🟢 활성화' if TOWN_ROLE_ENABLED else '🔴 비활성화'}\n"
+            f"🎯 **연동된 마을**: {town_mapping_count}개\n"
+            f"📋 **대기열**: {queue_size}명 ({processing_status})"
+        )
+        
+        embed.add_field(
+            name="📊 봇 상태",
+            value=status_text,
+            inline=True
+        )
+        
+        # 사용 팁
+        tips_text = (
+            "💡 `/확인` 명령어로 언제든 역할을 다시 받을 수 있어요!\n"
+            "💡 마인크래프트 계정 연동이 필요합니다.\n"
+            "💡 관리자는 `/마을역할`로 마을 역할을 관리하세요.\n"
+            "💡 문제가 있다면 관리자에게 문의하세요."
+        )
+        
+        embed.add_field(
+            name="💡 사용 팁",
+            value=tips_text,
+            inline=True
+        )
+        
+        # 푸터 정보
+        total_commands = len(self.bot.tree.get_commands())
+        embed.set_footer(
+            text=f"🤖 {self.bot.user.name} • 총 {total_commands}개 명령어 • 권한: {'관리자' if is_admin else '일반 사용자'}",
+            icon_url=self.bot.user.avatar.url if self.bot.user.avatar else None
+        )
+        
+        # 현재 시간 추가
+        import datetime
+        embed.timestamp = datetime.datetime.now()
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="마을역할", description="마을과 역할을 연동합니다")
     @app_commands.describe(
@@ -314,7 +526,7 @@ class SlashCommands(commands.Cog):
             
             embed.add_field(
                 name="📋 마을 확인 방법",
-                value=f"1. **웹사이트 확인**: https://api.planetearth.kr/nation?name={BASE_NATION}\n"
+                value=f"1. **웹사이트 확인**: {MC_API_BASE}/nation?name={BASE_NATION}\n"
                       f"2. **마을 추가 시**: 정확한 마을 이름을 입력하면 자동으로 검증됩니다\n"
                       f"3. **잘못된 마을**: {BASE_NATION} 소속이 아닌 경우 오류 메시지가 표시됩니다",
                 inline=False
@@ -322,21 +534,28 @@ class SlashCommands(commands.Cog):
             
             # 현재 매핑된 마을들 표시
             if TOWN_ROLE_ENABLED and town_role_manager:
-                mapped_towns = town_role_manager.get_mapped_towns()
-                if mapped_towns:
-                    # 10개씩 나누어서 표시
-                    for i in range(0, len(mapped_towns), 10):
-                        chunk = mapped_towns[i:i+10]
-                        field_name = f"✅ 이미 연동된 마을 ({i+1}-{min(i+10, len(mapped_towns))} / {len(mapped_towns)})"
+                try:
+                    mapped_towns = town_role_manager.get_mapped_towns()
+                    if mapped_towns:
+                        # 10개씩 나누어서 표시
+                        for i in range(0, len(mapped_towns), 10):
+                            chunk = mapped_towns[i:i+10]
+                            field_name = f"✅ 이미 연동된 마을 ({i+1}-{min(i+10, len(mapped_towns))} / {len(mapped_towns)})"
+                            embed.add_field(
+                                name=field_name,
+                                value="\n".join([f"• {town}" for town in chunk]),
+                                inline=False
+                            )
+                    else:
                         embed.add_field(
-                            name=field_name,
-                            value="\n".join([f"• {town}" for town in chunk]),
+                            name="ℹ️ 연동된 마을",
+                            value="아직 연동된 마을이 없습니다.",
                             inline=False
                         )
-                else:
+                except:
                     embed.add_field(
                         name="ℹ️ 연동된 마을",
-                        value="아직 연동된 마을이 없습니다.",
+                        value="마을 정보를 가져올 수 없습니다.",
                         inline=False
                     )
             
@@ -345,37 +564,44 @@ class SlashCommands(commands.Cog):
         
         elif 기능 == "목록":
             # 현재 연동된 마을-역할 목록 표시
-            mappings = town_role_manager.get_all_mappings()
-            
-            embed = discord.Embed(
-                title="📋 마을-역할 연동 목록",
-                color=0x00bfff
-            )
-            
-            if not mappings:
-                embed.description = "현재 연동된 마을-역할이 없습니다."
-            else:
-                embed.description = f"총 **{len(mappings)}개**의 마을-역할이 연동되어 있습니다."
+            try:
+                mappings = town_role_manager.get_all_mappings()
                 
-                # 10개씩 나누어서 표시
-                items = list(mappings.items())
-                for i in range(0, len(items), 10):
-                    chunk = items[i:i+10]
-                    field_items = []
+                embed = discord.Embed(
+                    title="📋 마을-역할 연동 목록",
+                    color=0x00bfff
+                )
+                
+                if not mappings:
+                    embed.description = "현재 연동된 마을-역할이 없습니다."
+                else:
+                    embed.description = f"총 **{len(mappings)}개**의 마을-역할이 연동되어 있습니다."
                     
-                    for town_name, role_id in chunk:
-                        # 역할이 존재하는지 확인
-                        role = interaction.guild.get_role(role_id)
-                        if role:
-                            field_items.append(f"• **{town_name}** → {role.mention}")
-                        else:
-                            field_items.append(f"• **{town_name}** → ⚠️ 역할 없음 (ID: {role_id})")
-                    
-                    embed.add_field(
-                        name=f"연동 목록 ({i+1}-{min(i+10, len(items))})",
-                        value="\n".join(field_items),
-                        inline=False
-                    )
+                    # 10개씩 나누어서 표시
+                    items = list(mappings.items())
+                    for i in range(0, len(items), 10):
+                        chunk = items[i:i+10]
+                        field_items = []
+                        
+                        for town_name, role_id in chunk:
+                            # 역할이 존재하는지 확인
+                            role = interaction.guild.get_role(role_id)
+                            if role:
+                                field_items.append(f"• **{town_name}** → {role.mention}")
+                            else:
+                                field_items.append(f"• **{town_name}** → ⚠️ 역할 없음 (ID: {role_id})")
+                        
+                        embed.add_field(
+                            name=f"연동 목록 ({i+1}-{min(i+10, len(items))})",
+                            value="\n".join(field_items),
+                            inline=False
+                        )
+            except Exception as e:
+                embed = discord.Embed(
+                    title="❌ 오류",
+                    description=f"마을-역할 목록을 가져오는 중 오류가 발생했습니다.\n{str(e)}",
+                    color=0xff0000
+                )
             
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
@@ -484,17 +710,24 @@ class SlashCommands(commands.Cog):
                 return
             
             # 매핑 제거
-            if town_role_manager.remove_mapping(마을):
+            try:
+                if town_role_manager.remove_mapping(마을):
+                    embed = discord.Embed(
+                        title="✅ 마을-역할 연동 해제",
+                        description=f"**{마을}** 마을의 역할 연동이 해제되었습니다.",
+                        color=0x00ff00
+                    )
+                else:
+                    embed = discord.Embed(
+                        title="⚠️ 연동되지 않은 마을",
+                        description=f"**{마을}**은(는) 연동되지 않은 마을입니다.",
+                        color=0xffaa00
+                    )
+            except Exception as e:
                 embed = discord.Embed(
-                    title="✅ 마을-역할 연동 해제",
-                    description=f"**{마을}** 마을의 역할 연동이 해제되었습니다.",
-                    color=0x00ff00
-                )
-            else:
-                embed = discord.Embed(
-                    title="⚠️ 연동되지 않은 마을",
-                    description=f"**{마을}**은(는) 연동되지 않은 마을입니다.",
-                    color=0xffaa00
+                    title="❌ 오류 발생",
+                    description=f"마을 연동 해제 중 오류가 발생했습니다.\n{str(e)}",
+                    color=0xff0000
                 )
             
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -512,7 +745,7 @@ class SlashCommands(commands.Cog):
         try:
             async with aiohttp.ClientSession() as session:
                 # 1단계: 디스코드 ID → 마크 ID
-                url1 = f"https://api.planetearth.kr/discord?discord={discord_id}"
+                url1 = f"{MC_API_BASE}/discord?discord={discord_id}"
                 print(f"  🔗 1단계 API 호출: {url1}")
                 
                 async with session.get(url1, timeout=aiohttp.ClientTimeout(total=10)) as r1:
@@ -558,7 +791,7 @@ class SlashCommands(commands.Cog):
                     time.sleep(2)
 
                 # 2단계: 마크 ID → 마을
-                url2 = f"https://api.planetearth.kr/resident?name={mc_id}"
+                url2 = f"{MC_API_BASE}/resident?name={mc_id}"
                 print(f"  🔗 2단계 API 호출: {url2}")
                 
                 async with session.get(url2, timeout=aiohttp.ClientTimeout(total=10)) as r2:
@@ -604,7 +837,7 @@ class SlashCommands(commands.Cog):
                     time.sleep(2)
 
                 # 3단계: 마을 → 국가
-                url3 = f"https://api.planetearth.kr/town?name={town}"
+                url3 = f"{MC_API_BASE}/town?name={town}"
                 print(f"  🔗 3단계 API 호출: {url3}")
                 
                 async with session.get(url3, timeout=aiohttp.ClientTimeout(total=10)) as r3:
@@ -796,25 +1029,32 @@ class SlashCommands(commands.Cog):
             
             # 마을 역할 연동 상태 표시
             if TOWN_ROLE_ENABLED and town_role_manager:
-                role_id = town_role_manager.get_role_id(town)
-                if role_id:
-                    town_role = guild.get_role(role_id)
-                    if town_role:
-                        embed.add_field(
-                            name="🏘️ 마을 역할",
-                            value=f"**{town}** → {town_role.mention}",
-                            inline=False
-                        )
+                try:
+                    role_id = town_role_manager.get_role_id(town)
+                    if role_id:
+                        town_role = guild.get_role(role_id)
+                        if town_role:
+                            embed.add_field(
+                                name="🏘️ 마을 역할",
+                                value=f"**{town}** → {town_role.mention}",
+                                inline=False
+                            )
+                        else:
+                            embed.add_field(
+                                name="🏘️ 마을 역할",
+                                value=f"**{town}** → ⚠️ 역할 없음 (ID: {role_id})",
+                                inline=False
+                            )
                     else:
                         embed.add_field(
                             name="🏘️ 마을 역할",
-                            value=f"**{town}** → ⚠️ 역할 없음 (ID: {role_id})",
+                            value=f"**{town}** → ℹ️ 역할 연동 안됨",
                             inline=False
                         )
-                else:
+                except:
                     embed.add_field(
                         name="🏘️ 마을 역할",
-                        value=f"**{town}** → ℹ️ 역할 연동 안됨",
+                        value=f"**{town}** → ⚠️ 역할 정보 확인 불가",
                         inline=False
                     )
             
@@ -838,13 +1078,17 @@ class SlashCommands(commands.Cog):
                 )
             
             # 마을 역할 연동 안내 (역할이 연동되지 않은 경우)
-            if TOWN_ROLE_ENABLED and town_role_manager and not town_role_manager.get_role_id(town):
-                embed.add_field(
-                    name="💡 안내",
-                    value=f"**{town}** 마을의 역할 연동이 필요하면 관리자에게 문의하세요.\n"
-                          f"관리자는 `/마을역할 기능:추가`로 역할을 연동할 수 있습니다.",
-                    inline=False
-                )
+            if TOWN_ROLE_ENABLED and town_role_manager:
+                try:
+                    if not town_role_manager.get_role_id(town):
+                        embed.add_field(
+                            name="💡 안내",
+                            value=f"**{town}** 마을의 역할 연동이 필요하면 관리자에게 문의하세요.\n"
+                                  f"관리자는 `/마을역할 기능:추가`로 역할을 연동할 수 있습니다.",
+                            inline=False
+                        )
+                except:
+                    pass
             
             await interaction.followup.send(embed=embed, ephemeral=True)
             print(f"🏁 /확인 처리 완료 - {member.display_name}: {nation}, {town}")
@@ -877,18 +1121,25 @@ class SlashCommands(commands.Cog):
             name="🔧 환경 설정",
             value=f"• **TOWN_ROLE_ENABLED**: {TOWN_ROLE_ENABLED}\n"
                   f"• **BASE_NATION**: {BASE_NATION}\n"
-                  f"• **MC_API_BASE**: {MC_API_BASE or '설정되지 않음'}",
+                  f"• **MC_API_BASE**: {MC_API_BASE}",
             inline=False
         )
         
         # town_role_manager 상태
         if TOWN_ROLE_ENABLED and town_role_manager:
-            mapping_count = town_role_manager.get_mapping_count()
-            embed.add_field(
-                name="🏘️ town_role_manager 상태",
-                value=f"• **상태**: 정상 로드됨\n• **매핑된 마을**: {mapping_count}개",
-                inline=False
-            )
+            try:
+                mapping_count = town_role_manager.get_mapping_count()
+                embed.add_field(
+                    name="🏘️ town_role_manager 상태",
+                    value=f"• **상태**: 정상 로드됨\n• **매핑된 마을**: {mapping_count}개",
+                    inline=False
+                )
+            except:
+                embed.add_field(
+                    name="🏘️ town_role_manager 상태",
+                    value="• **상태**: 로드됨 (일부 메서드 사용 불가)",
+                    inline=False
+                )
         else:
             embed.add_field(
                 name="🏘️ town_role_manager 상태",
@@ -949,11 +1200,9 @@ class SlashCommands(commands.Cog):
         
         # API 테스트
         try:
-            import aiohttp
-            api_base = MC_API_BASE or "https://api.planetearth.kr"
             async with aiohttp.ClientSession() as session:
                 # API 연결 테스트
-                url = f"{api_base}/nation?name={BASE_NATION}"
+                url = f"{MC_API_BASE}/nation?name={BASE_NATION}"
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as response:
                     if response.status == 200:
                         embed.add_field(
@@ -1046,12 +1295,19 @@ class SlashCommands(commands.Cog):
         
         # 마을 역할 관리자 상태
         if TOWN_ROLE_ENABLED and town_role_manager:
-            town_mapping_count = town_role_manager.get_mapping_count()
-            embed.add_field(
-                name="🏘️ 마을 역할 관리자",
-                value=f"**연동된 마을:** {town_mapping_count}개",
-                inline=False
-            )
+            try:
+                town_mapping_count = town_role_manager.get_mapping_count()
+                embed.add_field(
+                    name="🏘️ 마을 역할 관리자",
+                    value=f"**연동된 마을:** {town_mapping_count}개",
+                    inline=False
+                )
+            except:
+                embed.add_field(
+                    name="🏘️ 마을 역할 관리자",
+                    value="**상태:** 로드됨 (일부 기능 제한)",
+                    inline=False
+                )
         
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -1373,30 +1629,13 @@ class SlashCommands(commands.Cog):
         added_count = 0
         already_in_queue = 0
         
-        # QueueManager에 is_user_in_queue 메서드가 없다면 대체 방법 사용
-        try:
-            for member in members:
-                # 메서드가 존재하는지 확인
-                if hasattr(queue_manager, 'is_user_in_queue'):
-                    if queue_manager.is_user_in_queue(member.id):
-                        already_in_queue += 1
-                    else:
-                        queue_manager.add_user(member.id)
-                        added_count += 1
-                else:
-                    # is_user_in_queue 메서드가 없으면 항상 추가 시도
-                    # add_user에서 중복 확인을 해야 함
-                    queue_manager.add_user(member.id)
-                    added_count += 1
-        except Exception as e:
-            print(f"대기열 처리 중 오류: {e}")
-            # 모든 멤버를 추가 시도
-            for member in members:
-                try:
-                    queue_manager.add_user(member.id)
-                    added_count += 1
-                except:
-                    already_in_queue += 1
+        # 대기열에 사용자 추가
+        for member in members:
+            try:
+                queue_manager.add_user(member.id)
+                added_count += 1
+            except:
+                already_in_queue += 1
         
         # 결과 메시지 생성
         embed = discord.Embed(
@@ -1449,7 +1688,7 @@ class SlashCommands(commands.Cog):
 
                 try:
                     # 1단계: 디스코드 ID → 마크 ID
-                    url1 = f"https://api.planetearth.kr/discord?discord={discord_id}"
+                    url1 = f"{MC_API_BASE}/discord?discord={discord_id}"
                     print(f"  🔗 1단계 API 호출: {url1}")
                     
                     async with session.get(url1, timeout=aiohttp.ClientTimeout(total=10)) as r1:
@@ -1480,7 +1719,7 @@ class SlashCommands(commands.Cog):
                         time.sleep(5)
 
                     # 2단계: 마크 ID → 마을
-                    url2 = f"https://api.planetearth.kr/resident?name={mc_id}"
+                    url2 = f"{MC_API_BASE}/resident?name={mc_id}"
                     print(f"  🔗 2단계 API 호출: {url2}")
                     
                     async with session.get(url2, timeout=aiohttp.ClientTimeout(total=10)) as r2:
@@ -1511,7 +1750,7 @@ class SlashCommands(commands.Cog):
                         time.sleep(5)
 
                     # 3단계: 마을 → 국가
-                    url3 = f"https://api.planetearth.kr/town?name={town}"
+                    url3 = f"{MC_API_BASE}/town?name={town}"
                     print(f"  🔗 3단계 API 호출: {url3}")
                     
                     async with session.get(url3, timeout=aiohttp.ClientTimeout(total=10)) as r3:
@@ -1739,181 +1978,6 @@ class SlashCommands(commands.Cog):
             await interaction.response.send_message(f"🔁 자동실행 역할 추가됨: <@&{역할id}>", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ 오류: {str(e)}", ephemeral=True)
-
-    @app_commands.command(name="도움말", description="봇의 모든 명령어를 확인합니다")
-    async def 도움말(self, interaction: discord.Interaction):
-        """봇의 모든 명령어와 설명을 표시 - 개선된 버전"""
-        
-        # 관리자 권한 확인
-        is_admin = interaction.user.guild_permissions.administrator
-        
-        # 메인 임베드 생성
-        embed = discord.Embed(
-            title="📖 국민확인봇 명령어 가이드",
-            description=f"안녕하세요 {interaction.user.mention}님! 🎉\n사용 가능한 명령어들을 확인해보세요.",
-            color=0x2f3136
-        )
-        
-        # 썸네일 추가 (봇 아바타)
-        if self.bot.user.avatar:
-            embed.set_thumbnail(url=self.bot.user.avatar.url)
-        
-        # 일반 사용자 명령어 - 깔끔하게 정리
-        user_commands_info = {
-            "확인": {
-                "emoji": "✅",
-                "desc": "자신의 국적을 확인하고 역할을 받습니다",
-                "usage": "`/확인`",
-                "note": "마인크래프트 계정이 연동되어 있어야 합니다"
-            },
-            "도움말": {
-                "emoji": "📖",
-                "desc": "봇의 모든 명령어를 확인합니다",
-                "usage": "`/도움말`",
-                "note": "언제든지 사용 가능합니다"
-            }
-        }
-        
-        user_cmd_text = ""
-        for cmd_name, info in user_commands_info.items():
-            user_cmd_text += f"{info['emoji']} **{info['usage']}**\n"
-            user_cmd_text += f"   └ {info['desc']}\n"
-            user_cmd_text += f"   └ 💡 *{info['note']}*\n\n"
-        
-        embed.add_field(
-            name="👥 일반 사용자 명령어",
-            value=user_cmd_text.strip(),
-            inline=False
-        )
-        
-        # 관리자 명령어 - 카테고리별로 분류
-        if is_admin:
-            # 기본 관리 명령어
-            basic_admin_text = ""
-            basic_admin_commands = {
-                "테스트": "봇의 기본 기능을 테스트합니다",
-                "스케줄확인": "자동 실행 스케줄 정보를 확인합니다"
-            }
-            
-            for cmd_name, desc in basic_admin_commands.items():
-                basic_admin_text += f"🔧 **`/{cmd_name}`** - {desc}\n"
-            
-            embed.add_field(
-                name="🛠️ 기본 관리 명령어",
-                value=basic_admin_text,
-                inline=True
-            )
-            
-            # 사용자 관리 명령어
-            user_mgmt_text = ""
-            user_mgmt_commands = {
-                "국민확인": "사용자들의 국적을 확인합니다",
-                "예외설정": "자동실행 예외 대상을 관리합니다"
-            }
-            
-            for cmd_name, desc in user_mgmt_commands.items():
-                user_mgmt_text += f"👤 **`/{cmd_name}`** - {desc}\n"
-            
-            embed.add_field(
-                name="👥 사용자 관리",
-                value=user_mgmt_text,
-                inline=True
-            )
-            
-            # 대기열 관리 명령어
-            queue_mgmt_text = ""
-            queue_mgmt_commands = {
-                "대기열상태": "현재 대기열 상태를 확인합니다",
-                "대기열초기화": "대기열을 모두 비웁니다",
-                "자동실행시작": "자동 역할 부여를 수동으로 시작합니다",
-                "자동실행": "자동 등록할 역할을 설정합니다"
-            }
-            
-            for cmd_name, desc in queue_mgmt_commands.items():
-                queue_mgmt_text += f"📋 **`/{cmd_name}`** - {desc}\n"
-            
-            embed.add_field(
-                name="📋 대기열 관리",
-                value=queue_mgmt_text,
-                inline=False
-            )
-            
-            # 마을 역할 관리 (활성화된 경우에만)
-            if TOWN_ROLE_ENABLED:
-                town_mgmt_text = (
-                    "🏘️ **`/마을역할 기능:추가`** - 마을과 역할을 연동합니다 (버튼 선택)\n"
-                    "🏘️ **`/마을역할 기능:제거`** - 마을 역할 연동을 해제합니다\n"
-                    "🏘️ **`/마을역할 기능:목록`** - 연동된 마을-역할 목록을 확인합니다\n"
-                    "🏘️ **`/마을역할 기능:마을목록`** - 마을 연동 가이드를 확인합니다"
-                )
-                
-                embed.add_field(
-                    name="🏘️ 마을 역할 관리",
-                    value=town_mgmt_text,
-                    inline=False
-                )
-                
-                # 마을 역할 기능 설명 추가
-                embed.add_field(
-                    name="💡 마을 역할 연동 방법",
-                    value="1. **정확한 마을 이름** 입력\n"
-                          "2. **자동 검증** 후 결과 확인\n"
-                          "3. **버튼 선택**으로 연동 진행/취소\n"
-                          "4. **미검증 마을**도 수동 연동 가능",
-                    inline=False
-                )
-        else:
-            # 관리자가 아닌 경우
-            embed.add_field(
-                name="🛡️ 관리자 전용 명령어",
-                value=f"🔒 관리자 전용 명령어 **9개**가 있습니다.\n"
-                      f"관리자 권한이 필요합니다.",
-                inline=False
-            )
-        
-        # 봇 상태 정보
-        queue_size = queue_manager.get_queue_size()
-        is_processing = queue_manager.is_processing()
-        processing_status = "🔄 처리 중" if is_processing else "⏸️ 대기 중"
-        
-        status_text = (
-            f"🌐 **API 상태**: {'🟢 연결됨' if MC_API_BASE else '🔴 설정 필요'}\n"
-            f"🏴 **기본 국가**: {BASE_NATION}\n"
-            f"🏘️ **마을 역할**: {'🟢 활성화' if TOWN_ROLE_ENABLED else '🔴 비활성화'}\n"
-            f"📋 **대기열**: {queue_size}명 ({processing_status})"
-        )
-        
-        embed.add_field(
-            name="📊 봇 상태",
-            value=status_text,
-            inline=True
-        )
-        
-        # 사용 팁
-        tips_text = (
-            "💡 `/확인` 명령어로 언제든 역할을 다시 받을 수 있어요!\n"
-            "💡 마인크래프트 계정 연동이 필요합니다.\n"
-            "💡 문제가 있다면 관리자에게 문의하세요."
-        )
-        
-        embed.add_field(
-            name="💡 사용 팁",
-            value=tips_text,
-            inline=True
-        )
-        
-        # 푸터 정보
-        total_commands = len(self.bot.tree.get_commands())
-        embed.set_footer(
-            text=f"🤖 {self.bot.user.name} • 총 {total_commands}개 명령어 • 권한: {'관리자' if is_admin else '일반 사용자'}",
-            icon_url=self.bot.user.avatar.url if self.bot.user.avatar else None
-        )
-        
-        # 현재 시간 추가
-        import datetime
-        embed.timestamp = datetime.datetime.now()
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # 에러 핸들러
     @확인.error
